@@ -14,7 +14,7 @@ from appium import webdriver
 from appium.options.android import UiAutomator2Options
 from appium.webdriver.common.appiumby import AppiumBy
 from selenium.webdriver.remote.client_config import ClientConfig
-from device import AdbError, resolve_adb, subprocess_options
+from device import AdbController, AdbError, resolve_adb, subprocess_options
 
 
 class ManualLoginRequired(RuntimeError):
@@ -67,6 +67,35 @@ class MarketingAutomation:
         self.log = log or (lambda _: None)
         self.driver = None
         self._context = "NATIVE_APP"
+
+    def _connected_serial(self) -> str | None:
+        """Return the single authorized device Appium will use, when known."""
+        configured = self.config.get("udid") or self.config.get("device_serial")
+        if configured:
+            return str(configured)
+        try:
+            authorized = [serial for serial, state in AdbController().devices() if state == "device"]
+        except AdbError:
+            return None
+        return authorized[0] if len(authorized) == 1 else None
+
+    def _uiautomator_server_is_installed(self, serial: str) -> bool:
+        """Avoid repeating the Android security prompt on later sessions.
+
+        Appium's normal session startup runs ``adb install -r`` even when the
+        UiAutomator2 server is already present. Xiaomi/HyperOS may show its
+        "unknown app" confirmation for that reinstall every time. Requiring
+        both the server and its test APK lets us safely ask Appium to reuse an
+        already complete installation while retaining the first-install flow.
+        """
+        try:
+            adb = AdbController()
+            return all(
+                bool(adb.run("-s", serial, "shell", "pm", "path", package, timeout=15))
+                for package in ("io.appium.uiautomator2.server", "io.appium.uiautomator2.server.test")
+            )
+        except (AdbError, OSError):
+            return False
         self.on_detail_progress = None
 
     def connect(self) -> None:
@@ -76,6 +105,12 @@ class MarketingAutomation:
         options.device_name = self.config.get("device_name", "Android")
         options.app_package = self.config.get("app_package", "com.sh.cm.grid4a")
         options.app_activity = self.config.get("app_activity", "com.sh.cm.grid4a.SplashActivity")
+        serial = self._connected_serial()
+        if serial:
+            options.set_capability("appium:udid", serial)
+            if self._uiautomator_server_is_installed(serial):
+                options.set_capability("appium:skipServerInstallation", True)
+                self.log("已检测到 UiAutomator2 辅助服务，跳过重复安装")
         options.no_reset = True
         # Attach to the page the user already opened. Launching SplashActivity
         # for every desktop run can route an otherwise valid session to login.
