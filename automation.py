@@ -795,9 +795,63 @@ class MarketingAutomation:
             return False
 
     def _tap_full_view_free_entry(self) -> bool:
-        """Tap the fixed free-entry tile when the full-view H5 tree is absent."""
+        """Tap the free-entry tile from a fresh ADB dump, then use a safe fallback."""
         if not getattr(self, "_prefer_adb_home_tab", False):
             return False
+        if self._adb_tap_target_from_dump(text=self._text("marketing_entry")):
+            self.log('已通过 ADB 层级点击全景视图中的“营销助手(免签入)”')
+            time.sleep(1)
+            return True
+        serial = getattr(self, "_device_serial", None)
+        if not serial:
+            return False
+        try:
+            adb = AdbController()
+            sizes = re.findall(r"(\d+)x(\d+)", adb.run("-s", serial, "shell", "wm", "size", timeout=10))
+            if not sizes:
+                return False
+            width, height = map(int, sizes[-1])
+            if width >= height:
+                return False
+            # Right-hand tile in the second row; tap its icon centre, inside
+            # the card bounds on the target Honor layout.
+            adb.run("-s", serial, "shell", "input", "tap", str(round(width * .86)),
+                    str(round(height * .35)), timeout=10)
+            self.log('已通过 ADB 坐标点击全景视图中的“营销助手(免签入)”')
+            time.sleep(1)
+            return True
+        except (AdbError, OSError):
+            return False
+
+    def _adb_tap_target_from_dump(self, *, text: str | None = None,
+                                  resource_id: str | None = None) -> bool:
+        """Tap an exact target from a fresh ADB hierarchy, bypassing Appium source."""
+        if not text and not resource_id:
+            return False
+        root = self._adb_ui_root_from_adb()
+        if root is None:
+            return False
+        parents = {child: parent for parent in root.iter() for child in parent}
+        for node in root.iter():
+            if text and self._normal_text(self._node_label(node)) != self._normal_text(text):
+                continue
+            if resource_id and node.get("resource-id") != resource_id:
+                continue
+            if node.get("enabled") == "false":
+                continue
+            target = node
+            ancestor = node
+            while ancestor is not None:
+                if ancestor.get("clickable") == "true" and self._node_bounds(ancestor):
+                    target = ancestor
+                    break
+                ancestor = parents.get(ancestor)
+            bounds = self._node_bounds(target)
+            if not bounds:
+                continue
+            left, top, right, bottom = bounds
+            return self._adb_tap_xy((left + right) // 2, (top + bottom) // 2)
+        return False
 
     def _tap_smart_marketing_chain_by_adb(self) -> bool:
         """Use fixed navigation targets while the app homepage tree is blocked."""
@@ -814,31 +868,29 @@ class MarketingAutomation:
             width, height = map(int, sizes[-1])
             if width >= height:
                 return False
-            targets = (
-                (width * .245, height * .12, "个人业务"),
-                (width * .10, height * .18, "全景视图"),
-                (width * .79, height * .32, "营销助手(免签入)"),
-            )
-            for x, y, label in targets:
-                adb.run("-s", serial, "shell", "input", "tap", str(round(x)), str(round(y)), timeout=10)
+            # Do not burst taps while the H5 view is animating.  Wait for the
+            # marker for each step and tap its real clickable ancestor from
+            # ADB XML; coordinate fallback is used only if a dump is empty.
+            steps = (("个人业务", 20), ("全景视图", 20), (self._text("marketing_entry"), 30))
+            for label, wait_seconds in steps:
+                deadline = time.monotonic() + wait_seconds
+                tapped = False
+                while time.monotonic() < deadline:
+                    if self._adb_tap_target_from_dump(text=label):
+                        tapped = True
+                        break
+                    time.sleep(.5)
+                if not tapped:
+                    if label == "个人业务":
+                        x, y = width * .245, height * .12
+                    elif label == "全景视图":
+                        x, y = width * .10, height * .18
+                    else:
+                        x, y = width * .86, height * .35
+                    adb.run("-s", serial, "shell", "input", "tap", str(round(x)), str(round(y)), timeout=10)
                 self.log(f'已通过 ADB 点击“{label}”，等待页面加载')
                 time.sleep(1)
             self._source_unavailable_until = 0.0
-            return True
-        except (AdbError, OSError):
-            return False
-        serial = getattr(self, "_device_serial", None)
-        if not serial:
-            return False
-        try:
-            adb = AdbController()
-            sizes = re.findall(r"(\d+)x(\d+)", adb.run("-s", serial, "shell", "wm", "size", timeout=10))
-            if not sizes:
-                return False
-            width, height = map(int, sizes[-1])
-            adb.run("-s", serial, "shell", "input", "tap", str(round(width * .79)), str(round(height * .32)), timeout=10)
-            self.log('已通过 ADB 点击全景视图中的“营销助手(免签入)”，等待输入页')
-            time.sleep(1)
             return True
         except (AdbError, OSError):
             return False
@@ -885,7 +937,10 @@ class MarketingAutomation:
         self._back_to_entry_surface()
         self._tap_home_marketing_flow()
         input_timeout = int(self.config.get("timing", {}).get("input_page_timeout_seconds", 90))
-        self._wait_phone_input(timeout=max(30, input_timeout))
+        # Keep the field found during readiness polling.  Re-querying it in
+        # ``_query_once`` used to trigger a second 35-second Appium source
+        # timeout on Honor even though the first ADB lookup had succeeded.
+        self._entry_field = self._wait_phone_input(timeout=max(30, input_timeout))
         self._verify_free_entry_title()
         self.log("已确认免签入手机号输入页")
 
@@ -1722,9 +1777,15 @@ class MarketingAutomation:
         self._detail_checkpointed = False
         if self.config.get("check_login_state", False):
             self._require_manual_login_if_needed()
+        self._entry_field = None
         self._ensure_entry()
-        input_timeout = int(self.config.get("timing", {}).get("input_page_timeout_seconds", 90))
-        field = self._wait_phone_input(timeout=max(30, input_timeout))
+        field = getattr(self, "_entry_field", None)
+        if field is None:
+            # Compatibility path for callers/tests that override
+            # ``_ensure_entry``; the production path always reuses the field
+            # found by the readiness wait above.
+            input_timeout = int(self.config.get("timing", {}).get("input_page_timeout_seconds", 90))
+            field = self._wait_phone_input(timeout=max(30, input_timeout))
         if isinstance(field, dict) and field.get("adb"):
             self._adb_enter_phone(field, phone)
             self.log(f"已通过 ADB 输入号码后四位 {phone[-4:]} 并点击跳转")
