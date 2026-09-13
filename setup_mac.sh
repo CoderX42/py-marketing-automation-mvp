@@ -13,6 +13,18 @@ if ! command -v brew >/dev/null 2>&1; then
   fi
 fi
 
+# Recent macOS installations may not include a usable python3. Install the
+# Homebrew interpreter before creating the project virtual environment.
+if ! command -v python3 >/dev/null 2>&1; then
+  brew install python
+fi
+
+# UiAutomator2 uses the Java toolchain on the computer. Install a supported
+# JDK only when no Java 17 runtime is available.
+if [[ -x /usr/libexec/java_home ]] && ! /usr/libexec/java_home -v 17 >/dev/null 2>&1; then
+  brew install --cask temurin@17
+fi
+
 brew update
 brew install --cask android-platform-tools
 brew install node

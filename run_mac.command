@@ -5,7 +5,20 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/Library/Android/sdk/platform
 # Qt may log a harmless font-fallback timing message on macOS; keep the
 # launcher output focused on actionable ADB/Appium errors.
 export QT_LOGGING_RULES="${QT_LOGGING_RULES:-qt.qpa.fonts=false}"
+# The system Python on older macOS releases links LibreSSL while urllib3 v2
+# prefers OpenSSL.  Appium still works; hide this known startup warning so the
+# terminal only shows actionable setup/runtime errors.
+export PYTHONWARNINGS="${PYTHONWARNINGS:-ignore:urllib3 v2 only supports OpenSSL}"
 cd "$(dirname "$0")"
+
+# A new Mac may not ship with Python or Homebrew. Run the idempotent setup
+# script first so the virtual environment can be created reliably.
+if ! command -v brew >/dev/null 2>&1; then
+  ./setup_mac.sh
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  brew install python
+fi
 
 # Homebrew 的 Platform-Tools 是独立 cask，Appium 仍需要 ANDROID_HOME。
 if [[ -z "${ANDROID_HOME:-}" ]]; then
@@ -17,9 +30,9 @@ if [[ -z "${ANDROID_HOME:-}" ]]; then
     fi
   done
 fi
-if [[ ! -d .venv ]]; then
+if [[ ! -x .venv/bin/python ]] || ! .venv/bin/python -c 'import PySide6, appium, openpyxl' >/dev/null 2>&1; then
   python3 -m venv .venv
-  .venv/bin/pip install -r requirements.txt
+  .venv/bin/python -m pip install -r requirements.txt
 fi
 source .venv/bin/activate
 
@@ -46,6 +59,15 @@ if ! command -v appium >/dev/null 2>&1; then
 fi
 if ! appium driver list --installed 2>&1 | grep -qi uiautomator2; then
   appium driver install uiautomator2
+fi
+
+# Appium's Android driver requires a JDK. Prefer Java 17 when several JDKs
+# are installed, while leaving an existing compatible JAVA_HOME untouched.
+if [[ -x /usr/libexec/java_home ]]; then
+  java_home_17="$(/usr/libexec/java_home -v 17 2>/dev/null || true)"
+  if [[ -n "$java_home_17" ]]; then
+    export JAVA_HOME="$java_home_17"
+  fi
 fi
 
 python app.py

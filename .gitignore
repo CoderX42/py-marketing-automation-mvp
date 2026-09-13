@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 .DS_Store
 config.json
+build*/
+dist*/
+release-*/
+windows-env-cache/
+*.dmg
+*.zip
+marketing-automation-windows-v1.1/

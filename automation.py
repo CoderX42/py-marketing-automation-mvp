@@ -36,12 +36,21 @@ NETWORK_ERROR_MARKERS = (
     "当前网络不可用",
     "请检查网络环境",
     "网络不可用，请检查你的网络",
+    "网络连接超时",
+    "网络请求超时",
+    "网络异常，请稍后再试",
     "服务器请求超时",
     "服务器响应超时",
     "无法连接服务器",
     "服务器连接异常",
     "服务器返回异常",
 )
+# The network failure is rendered as a red, non-modal banner on some builds.
+# Its close control is often an unlabeled ImageView, so text-only lookup of
+# “确定” cannot remove it.  Keep a small, conservative set of labels/ids for
+# the close-control search and use the banner's top-right corner as a fallback.
+NETWORK_CLOSE_LABELS = {"关闭", "取消", "×", "✕", "✖", "x", "close", "dismiss"}
+NETWORK_CLOSE_ID_HINTS = ("close", "dismiss", "cancel", "guanbi")
 SESSION_ERROR_MARKERS = (
     "当前登录已失效",
     "认证凭证失败",
@@ -246,14 +255,22 @@ class MarketingAutomation:
         raise TimeoutError("未检测到登录成功页面")
 
     def _click_text(self, key: str, timeout: int = 15) -> None:
+        # A banner can appear between the page wait and this Appium lookup.
+        # Clear it first so the element we find is actually tappable.
+        self._dismiss_network_popup()
+        self._raise_if_network_error()
         element = self._find_text(self._text(key), timeout)
         if not element and self._try_webview():
             element = self._find_text(self._text(key), timeout)
         if not element:
             raise TimeoutError(f"找不到控件：{self._text(key)}")
+        self._dismiss_network_popup()
+        self._raise_if_network_error()
         self._click_element(element)
 
     def _click_if_present(self, key: str, timeout: int = 5) -> bool:
+        self._dismiss_network_popup()
+        self._raise_if_network_error()
         text = self._text(key)
         if not text:
             return False
@@ -261,6 +278,8 @@ class MarketingAutomation:
         if not element and self._try_webview():
             element = self._find_text(text, timeout)
         if element:
+            self._dismiss_network_popup()
+            self._raise_if_network_error()
             self._click_element(element)
             return True
         return False
@@ -323,6 +342,8 @@ class MarketingAutomation:
                 elements = self.driver.find_elements(by, value)
                 if elements:
                     return elements[-1]
+            except (NetworkUnavailableError, ManualLoginRequired):
+                raise
             except Exception:
                 pass
         if self._try_webview():
@@ -335,6 +356,8 @@ class MarketingAutomation:
                     elements = self.driver.find_elements(by, value)
                     if elements:
                         return elements[-1]
+                except (NetworkUnavailableError, ManualLoginRequired):
+                    raise
                 except Exception:
                     pass
         raise TimeoutError("找不到手机号输入框")
@@ -342,23 +365,47 @@ class MarketingAutomation:
     def _wait_phone_input(self, timeout: int = 10):
         end = time.time() + timeout
         last_error = None
+        # A network failure can leave a red banner above the otherwise valid
+        # input page.  Remove that transient obstruction before looking up the
+        # field; if it cannot be removed, let NetworkUnavailableError reach
+        # the retry wrapper instead of turning it into a misleading timeout.
+        self._dismiss_network_popup()
         self._raise_if_network_error()
         while time.time() < end:
             try:
+                # The banner often arrives a few seconds *after* the input
+                # page navigation starts.  Checking only once before this
+                # loop turns that state into the misleading “输入页未加载”
+                # timeout seen in the desktop log.  Re-check on every poll so
+                # the retry wrapper can classify it as a network interruption
+                # and retry the same phone.
+                self._raise_if_network_error()
                 return self._phone_input()
+            except (NetworkUnavailableError, ManualLoginRequired):
+                raise
             except Exception as exc:
                 last_error = exc
                 time.sleep(0.4)
-        raise TimeoutError("手机号输入页未加载完成") from last_error
+        # A failed network request can return the app to Home (or leave a
+        # plugin activity in front) without exposing the red banner in the
+        # accessibility tree.  The old generic timeout was then recorded as
+        # a navigation failure and stopped the batch before the same number
+        # could be retried.  Treat this pre-input timeout as a transient
+        # navigation/network interruption; ``query`` will re-enter the full
+        # workflow for this phone and retain the normal bounded retry policy.
+        raise NetworkUnavailableError("手机号输入页未加载完成，可能被网络提示遮挡，正在重试当前号码") from last_error
 
     def _back_to_entry_surface(self) -> None:
         """Leave a previous detail/input page so the next number starts at the entry."""
         if not self.driver:
             return
         self._switch_native()
-        for _ in range(3):
+        self._dismiss_network_popup()
+        expected_package = self.config.get("app_package", "com.sh.cm.grid4a")
+        for _ in range(5):
             try:
                 activity = str(self.driver.current_activity or "")
+                package = str(self.driver.current_package or "")
             except Exception:
                 return
             # MainActivity contains the home/smart-marketing cards. The input
@@ -367,6 +414,17 @@ class MarketingAutomation:
             if "MainActivity" in activity or "Login" in activity or "login" in activity.lower():
                 return
             if not any(name in activity for name in ("MiniHtmlActivity", "VerifyStep1Activity", "WebActivity")):
+                # The app occasionally leaves a short-lived plug-in activity
+                # (for example `.plugin.gallery.ui.AlbumPreviewUI`) in front
+                # of MainActivity after a failed network request.  It is safe
+                # to press Back while the target package still owns the
+                # foreground activity; only report an error after the back
+                # stack has actually left the target app.
+                if package == expected_package or not package:
+                    self.log(f"当前处于应用子页面 {activity or '未知'}，返回上一页")
+                    self.driver.back()
+                    time.sleep(0.8)
+                    continue
                 raise NavigationError(f"当前页面无法自动返回查询入口：{activity}")
             self.driver.back()
             time.sleep(0.8)
@@ -375,10 +433,32 @@ class MarketingAutomation:
         deadline = time.monotonic() + timeout
         while True:
             root = self._adb_ui_root()
-            if root is not None and predicate(root):
-                return root
             if root is not None:
-                self._check_session_message(self._root_text(root), check_login=False)
+                try:
+                    # Check overlays before accepting the underlying page.
+                    # The red banner is included in the same accessibility
+                    # tree as the page it covers, so evaluating ``predicate``
+                    # first could return a seemingly valid page while every
+                    # subsequent tap is still intercepted by the banner.
+                    self._check_session_message(self._root_text(root), check_login=False)
+                except NetworkUnavailableError:
+                    # The banner is a visual overlay, not a page transition.
+                    # Close it and keep polling the same page so a tap below it
+                    # is not attempted while it is still intercepting input.
+                    blocks_taps = self._network_overlay_blocks_taps(root)
+                    self._dismiss_network_popup(root)
+                    if not blocks_taps and predicate(root):
+                        # A bottom Toast does not own the input surface. The
+                        # requested page label underneath it is already safe
+                        # to use; waiting for the Toast's lifetime can make a
+                        # valid navigation look like a timeout.
+                        return root
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.35)
+                    continue
+                if predicate(root):
+                    return root
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.5)
@@ -388,6 +468,7 @@ class MarketingAutomation:
 
     def _tap_common_free_entry(self) -> None:
         self.log('智慧营销入口未加载，改用“首页 → 常用 → 营销助手(免签入)”')
+        self._dismiss_network_popup()
         if not self._adb_tap_target(resource_id="com.sh.cm.grid4a:id/menu_nav_item_1"):
             raise NavigationError("未找到底部首页，无法进入常用入口")
         root = self._wait_ui(lambda r: self._has_label(r, "常用"), timeout=15)
@@ -407,6 +488,7 @@ class MarketingAutomation:
 
     def _tap_home_marketing_flow(self) -> None:
         self.log('正在进入“智慧营销”')
+        self._dismiss_network_popup()
         if not self._adb_tap_target(resource_id="com.sh.cm.grid4a:id/menu_nav_item_2"):
             raise NavigationError("未找到底部智慧营销页签，请将手机停留在应用首页")
         root = self._wait_ui(lambda r: self._has_label(r, self._text("home_marker")) or
@@ -434,6 +516,7 @@ class MarketingAutomation:
 
     def _ensure_entry(self) -> None:
         self._switch_native()
+        self._dismiss_network_popup()
         self._back_to_entry_surface()
         self._tap_home_marketing_flow()
         self._wait_phone_input(timeout=30)
@@ -441,6 +524,7 @@ class MarketingAutomation:
         self.log("已确认免签入手机号输入页")
 
     def _verify_free_entry_title(self) -> None:
+        self._dismiss_network_popup()
         root = self._adb_ui_root()
         if root is None or not self._has_label(root, self._text("marketing_entry")):
             raise NavigationError("当前输入页标题不是“营销助手(免签入)”，已停止输入")
@@ -456,10 +540,7 @@ class MarketingAutomation:
 
     def _check_session_message(self, texts: list[str], *, check_login: bool = True) -> None:
         joined = "\n".join(texts)
-        configured_network = self._text("network_error")
-        network_markers = (*NETWORK_ERROR_MARKERS,
-                           configured_network if configured_network != "network_error" else "")
-        if any(marker and marker in joined for marker in network_markers):
+        if any(marker in joined for marker in self._network_markers()):
             raise NetworkUnavailableError("手机应用提示网络不可用，请在手机恢复网络或重新登录后继续")
         if any(marker in joined for marker in SESSION_ERROR_MARKERS):
             raise ManualLoginRequired("手机应用登录凭证或安全隧道已失效，请在手机重新登录后继续")
@@ -556,8 +637,22 @@ class MarketingAutomation:
 
     def _detail_snapshot(self):
         root = self._adb_ui_root()
+        if root is None:
+            raise NavigationError("无法读取营销详情页面")
         all_text = self._root_text(root)
-        self._check_session_message(all_text)
+        try:
+            self._check_session_message(all_text)
+        except NetworkUnavailableError:
+            # A bottom timeout Toast can coexist with an already loaded detail
+            # page and does not intercept scrolling. Keep collecting in that
+            # case; only a red banner/centered dialog should restart the phone.
+            detail_visible = self._has_label(root, self._text("detail_marker"))
+            blocks_taps = self._network_overlay_blocks_taps(root)
+            self._dismiss_network_popup(root)
+            if not detail_visible or blocks_taps:
+                # Preserve the partial detail checkpoint, but remove the
+                # blocking banner before the outer query retry starts.
+                raise
         if not self._has_label(root, self._text("detail_marker")):
             raise NavigationError("采集时已离开营销详情页")
         webviews = [n for n in root.iter() if n.get("class") == "android.webkit.WebView"]
@@ -566,6 +661,11 @@ class MarketingAutomation:
         for node in area.iter():
             text = self._clean_detail_label(node.get("text") or node.get("content-desc") or "")
             if not text or text in {"关闭", "返回", self._text("detail_marker")}:
+                continue
+            # The transient network Toast may be included in the WebView
+            # subtree by a few accessibility bridges. It is status feedback,
+            # not marketing content, and must not be exported as a detail line.
+            if any(marker in text for marker in self._network_markers()):
                 continue
             # A WebView label and its child may describe the same visual node.
             identity = (text, node.get("bounds"))
@@ -594,6 +694,7 @@ class MarketingAutomation:
     def _record_detail(self, lines):
         clean = [self._clean_detail_label(t) for t in lines]
         clean = [t for t in clean if t and t not in {"关闭", "返回", self._text("detail_marker")}]
+        clean = [t for t in clean if not any(marker in t for marker in self._network_markers())]
         clean = [t for i, t in enumerate(clean) if not (
             i and t == clean[i - 1] and t in {"用户推荐方案", "推荐业务", "属地推荐方案"})]
         # Replace the loading skeleton once actual recommendations arrive.
@@ -662,7 +763,24 @@ class MarketingAutomation:
                 time.sleep(.5)
                 continue
             last_text = self._root_text(root)
-            self._check_session_message(last_text)
+            try:
+                self._check_session_message(last_text)
+            except NetworkUnavailableError:
+                # A red banner/timeout toast can coexist with an already
+                # loaded detail page.  In that case clear it and keep waiting
+                # for the page to settle.  If the detail marker is absent,
+                # this is a navigation failure (usually the app returned to
+                # Home); propagate immediately so ``query`` can re-enter and
+                # retry the same phone instead of polling a dead page for the
+                # whole detail timeout.
+                detail_visible = self._has_label(root, self._text("detail_marker"))
+                self._dismiss_network_popup(root)
+                if not detail_visible:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.35)
+                continue
             business_error = self._business_dialog_error(root)
             if business_error:
                 return last_text, business_error
@@ -738,6 +856,35 @@ class MarketingAutomation:
         root = self._adb_ui_root()
         if root is None:
             return False
+        # Re-read after clearing an overlay.  A network banner shares the
+        # hierarchy with the page underneath it; selecting a target from that
+        # stale tree would send a tap that the banner intercepts.
+        if self._contains_network_marker(self._root_text(root)):
+            blocks_taps = self._network_overlay_blocks_taps(root)
+            self._dismiss_network_popup(root)
+            if blocks_taps:
+                # The red bar has a short exit animation. An immediate second
+                # hierarchy read can still contain the old node, which used
+                # to turn a recoverable overlay into a false “入口未找到”
+                # failure. Ignore a bottom Toast while waiting; it does not
+                # intercept the target tap.
+                clear_deadline = time.monotonic() + 2.5
+                while True:
+                    root = self._adb_ui_root()
+                    if root is not None and not self._network_overlay_blocks_taps(root):
+                        break
+                    if time.monotonic() >= clear_deadline:
+                        raise NetworkUnavailableError("手机应用网络异常提示未消失，正在重试当前号码")
+                    time.sleep(0.2)
+                if root is None or self._network_overlay_blocks_taps(root):
+                    raise NetworkUnavailableError("手机应用网络异常提示未消失，正在重试当前号码")
+            else:
+                # A Toast can remain in the hierarchy for several seconds but
+                # does not own the input surface. Refresh once to avoid using
+                # a stale page tree, then continue with the real target.
+                refreshed = self._adb_ui_root()
+                if refreshed is not None:
+                    root = refreshed
         parents = {child: parent for parent in root.iter() for child in parent}
         for node in root.iter():
             label = node.attrib.get("text") or node.attrib.get("content-desc") or ""
@@ -775,26 +922,264 @@ class MarketingAutomation:
     def _adb_tap_text(self, text: str) -> bool:
         return self._adb_tap_target(text=text)
 
-    def _dismiss_network_popup(self) -> None:
-        """Dismiss only the known network dialog before retrying the same phone."""
+    def _network_markers(self) -> tuple[str, ...]:
+        configured = self._text("network_error")
+        values = (*NETWORK_ERROR_MARKERS, configured if configured != "network_error" else "")
+        # Preserve order for readable diagnostics while avoiding duplicate
+        # checks when the configured marker is one of the built-ins.
+        return tuple(dict.fromkeys(value for value in values if value))
+
+    def _contains_network_marker(self, texts: list[str]) -> bool:
+        joined = "\n".join(texts)
+        return any(marker in joined for marker in self._network_markers())
+
+    def _network_overlay_blocks_taps(self, root) -> bool:
+        """Return whether a network overlay is likely to intercept a tap.
+
+        Some ROMs expose the short bottom message as ``android.widget.Toast``
+        in the same hierarchy as the page. A Toast is not an input blocker,
+        while the red banner and centered network dialog are. Classifying the
+        overlay prevents a long-lived Toast from forcing an unnecessary retry.
+        """
+        if not isinstance(root, ET.Element):
+            return False
+        nodes = self._network_marker_nodes(root)
+        if not nodes:
+            return False
+        _, height = self._screen_size()
+        for node in nodes:
+            cls = (node.attrib.get("class") or "").lower()
+            bounds = self._node_bounds(node)
+            label = self._node_label(node)
+            # A few Xiaomi dumps omit the Toast class.  Its complete timeout
+            # wording and lower-screen bounds are still enough to distinguish
+            # it from the red top banner or a centered dialog.
+            if (bounds and bounds[1] > max(420, int(height * .45)) and
+                    any(marker in label for marker in ("网络连接超时", "网络请求超时", "网络异常，请稍后再试"))):
+                continue
+            if "toast" not in cls:
+                return True
+            # A mislabeled top Toast may actually be the red bar; only treat a
+            # clearly lower Toast as non-blocking.
+            if bounds and bounds[1] <= max(420, int(height * .30)):
+                return True
+        return False
+
+    @staticmethod
+    def _node_label(node) -> str:
+        return (node.attrib.get("text") or node.attrib.get("content-desc") or "").strip()
+
+    def _network_marker_nodes(self, root):
+        markers = self._network_markers()
+        return [node for node in root.iter()
+                if any(marker in self._node_label(node) for marker in markers)]
+
+    def _screen_size(self) -> tuple[int, int]:
         try:
-            texts, confirm_bounds = self._adb_ui_snapshot()
+            size = self.driver.get_window_size() if self.driver else {}
+            width = int(size.get("width", 0))
+            height = int(size.get("height", 0))
+            if width > 0 and height > 0:
+                return width, height
+        except Exception:
+            pass
+        return 1080, 2400
+
+    def _network_banner_bounds(self, root, marker_nodes) -> tuple[int, int, int, int] | None:
+        candidates = [(bounds, node) for node in marker_nodes
+                      if (bounds := self._node_bounds(node)) and
+                      "toast" not in (node.attrib.get("class") or "").lower()]
+        if not candidates:
+            return None
+        width, height = self._screen_size()
+        # A Toast can expose the same text and a perfectly valid bounds
+        # rectangle, but it is rendered near the bottom of the screen and has
+        # no dismiss target.  Only a compact rectangle in the upper portion
+        # of the display is a safe candidate for the red banner's X button.
+        compact = [(b, node) for b, node in candidates
+                   if b[3] - b[1] <= max(420, int(height * .45))]
+        top = [(b, node) for b, node in compact
+               if b[1] <= max(420, int(height * .30))]
+        if top:
+            return min(top, key=lambda item: (item[0][2] - item[0][0]) *
+                       (item[0][3] - item[0][1]))[0]
+        # Some accessibility bridges attach the marker to a full-screen
+        # WebView node instead of exposing the red bar's own bounds.  Keep the
+        # old full-screen fallback, which normalizes the tap to the top-right
+        # strip.  A bottom Toast is compact and therefore does not enter this
+        # branch.
+        large = [(b, node) for b, node in candidates
+                 if (b[2] - b[0]) >= int(width * .80) and
+                    (b[3] - b[1]) >= int(height * .60)]
+        if not large:
+            return None
+        return min(large, key=lambda item: (item[0][2] - item[0][0]) *
+                   (item[0][3] - item[0][1]))[0]
+
+    def _network_close_bounds(self, root, banner):
+        if root is None:
+            return None
+        screen_width, screen_height = self._screen_size()
+        _, banner_top, _, banner_bottom = banner or (0, 0, 0, 0)
+        found = []
+        for node in root.iter():
+            bounds = self._node_bounds(node)
+            if not bounds or node.attrib.get("enabled") == "false":
+                continue
+            label = self._normal_text(self._node_label(node)).lower()
+            resource_id = (node.attrib.get("resource-id") or "").lower()
+            explicit = label in {self._normal_text(value).lower() for value in NETWORK_CLOSE_LABELS}
+            explicit = explicit or any(hint in resource_id for hint in NETWORK_CLOSE_ID_HINTS)
+            if not explicit:
+                continue
+            center_x = (bounds[0] + bounds[2]) / 2
+            if center_x < screen_width * .65:
+                # The detail page has a left-side “关闭” label.  Even when
+                # its vertical range overlaps the red banner, it must never
+                # be selected as the banner's dismissal control.
+                continue
+            if banner:
+                top, bottom = bounds[1], bounds[3]
+                if bottom < banner_top or top > banner_bottom:
+                    continue
+            else:
+                # Some accessibility bridges expose the banner text without
+                # bounds, but still expose the X as a labelled/resource-id
+                # node.  Restrict that fallback to the upper-right strip so
+                # a normal “关闭” control lower in the page is never tapped.
+                if bounds[1] > max(420, int(screen_height * .35)):
+                    continue
+                if ((bounds[0] + bounds[2]) / 2) < screen_width * .65:
+                    continue
+            # Prefer the smallest explicit close control nearest the right edge.
+            found.append((-(center_x), (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]), bounds))
+        if not found:
+            return None
+        found.sort(key=lambda value: (value[0], value[1]))
+        return found[0][2]
+
+    def _network_fallback_point(self, banner) -> tuple[int, int]:
+        width, height = self._screen_size()
+        if banner:
+            left, top, right, bottom = banner
+            if right > width:
+                # Test doubles and a few remote-display bridges expose the
+                # physical bounds even when get_window_size() is unavailable.
+                width = right
+            # A text node often covers only the left part of a full-width
+            # banner; the close X is still at the device's right edge.
+            if right - left < int(width * .85):
+                left, right = 0, width
+            # A WebView root can report the entire screen as the marker bounds.
+            if bottom - top > int(height * .6):
+                # The red strip sits just below the status bar on the target
+                # app (roughly 4–8% of the display). Keep the fallback inside
+                # that strip instead of landing on its lower edge.
+                top, bottom = int(height * .03), int(height * .09)
+            x = right - max(48, min(96, (right - left) // 12))
+            y = (top + bottom) // 2
+        else:
+            x = width - 60
+            y = max(100, min(260, height // 12))
+        return max(1, min(width - 1, int(x))), max(1, min(height - 1, int(y)))
+
+    def _tap_network_point(self, point: tuple[int, int]) -> bool:
+        x, y = point
+        if self._adb_tap_xy(x, y):
+            return True
+        if self.driver:
+            try:
+                self._switch_native()
+                self.driver.execute_script("mobile: clickGesture", {"x": x, "y": y})
+                return True
+            except Exception:
+                pass
+        return False
+
+    def _dismiss_network_popup(self, root=None) -> bool:
+        """Close the red network banner (or account for a transient Toast).
+
+        The APK uses two different overlays for the same failure: a red
+        full-width banner with an unlabeled X and a short ``Toast`` saying
+        “网络连接超时，请稍后再试”.  The old implementation only searched for
+        a “确定” button, leaving the banner over the page and causing every
+        following tap to be intercepted.  This method deliberately uses one
+        fresh hierarchy, taps the explicit close control when exposed, and
+        otherwise taps the banner's top-right corner.
+        """
+        try:
+            confirm_bounds = None
+            if root is None:
+                try:
+                    candidate = self._adb_ui_root()
+                    if isinstance(candidate, ET.Element):
+                        root = candidate
+                except Exception:
+                    root = None
+            if isinstance(root, ET.Element):
+                texts = self._root_text(root)
+                for node in root.iter():
+                    if self._normal_text(self._node_label(node)) == self._normal_text(self._text("confirm_button")):
+                        confirm_bounds = self._node_bounds(node)
+            else:
+                texts, confirm_bounds = self._adb_ui_snapshot()
+            if not self._contains_network_marker(texts):
+                return False
+
+            marker_nodes = self._network_marker_nodes(root) if isinstance(root, ET.Element) else []
+            banner = self._network_banner_bounds(root, marker_nodes) if marker_nodes else None
             joined = "\n".join(texts)
-            configured_network = self._text("network_error")
-            network_markers = (*NETWORK_ERROR_MARKERS,
-                               configured_network if configured_network != "network_error" else "")
-            if not any(marker and marker in joined for marker in network_markers):
-                return
-            dismissed = False
-            if confirm_bounds:
+            banner_text = any(marker in joined for marker in ("当前网络不可用", "请检查网络环境"))
+            toast_only = any(marker in joined for marker in ("网络连接超时", "网络请求超时", "网络异常，请稍后再试")) and not banner_text
+            # Do not search for a generic “关闭/取消” control when the only
+            # network signal is a bottom Toast.  Such a control may belong to
+            # the underlying page and tapping it would be destructive.
+            # A bottom Toast has no dismissal control.  Only inspect explicit
+            # close nodes when this hierarchy also gives us evidence of the
+            # top red banner (bounds or its distinctive wording).  Searching
+            # for a generic “关闭” while a Toast is the sole signal can tap a
+            # real page control underneath the transient message.
+            close_bounds = self._network_close_bounds(root, banner) if (banner or banner_text) else None
+            point = None
+            if close_bounds:
+                left, top, right, bottom = close_bounds
+                point = ((left + right) // 2, (top + bottom) // 2)
+            elif confirm_bounds and (banner or banner_text or
+                                     (not toast_only and not isinstance(root, ET.Element)) or
+                                     # Some Android builds expose a centered
+                                     # network timeout dialog as plain text
+                                     # (without banner bounds) and classify its
+                                     # message as a Toast.  If the marker
+                                     # itself blocks taps and a confirm control
+                                     # is present, it is the dialog's button;
+                                     # tap it.  A genuine bottom Toast is
+                                     # classified as non-blocking above, so an
+                                     # underlying page button is never touched.
+                                     (toast_only and self._network_overlay_blocks_taps(root))):
                 left, top, right, bottom = confirm_bounds
-                dismissed = self._adb_tap_xy((left + right) // 2, (top + bottom) // 2)
-            if not dismissed:
-                dismissed = self._click_if_present("confirm_button", timeout=2)
+                point = ((left + right) // 2, (top + bottom) // 2)
+            else:
+                # A bottom Toast has no safe dismissal coordinate.  Use the
+                # top-right fallback only for the red-banner wording itself.
+                if banner or banner_text:
+                    point = self._network_fallback_point(banner)
+
+            # A Toast has no dismiss button.  Let it expire while the query
+            # retry wrapper waits; never tap an unrelated part of the page.
+            if point is None:
+                self.log("检测到网络超时提示，等待提示消失后重试当前号码")
+                return False
+            dismissed = self._tap_network_point(point)
             if dismissed:
                 self.log("已关闭网络异常提示，准备重试当前号码")
+            else:
+                self.log("已尝试关闭网络异常提示，准备重试当前号码")
+            return dismissed
         except Exception as exc:
-            self.log(f"关闭网络异常提示失败，将直接重试：{str(exc).split('Stacktrace:')[0]}")
+            logger = getattr(self, "log", None)
+            if callable(logger):
+                logger(f"关闭网络异常提示失败，将直接重试：{str(exc).split('Stacktrace:')[0]}")
+            return False
 
     def query(self, phone: str) -> dict:
         """Retry a transient app network dialog, without skipping the current phone."""
@@ -819,8 +1204,11 @@ class MarketingAutomation:
                     return best_partial
                 raise last_error
             delay = min(base_delay * (2 ** attempt), 60.0)
-            self.log(f"检测到应用网络异常，{delay:g} 秒后自动重试当前号码（{attempt + 1}/{retries}）")
+            # Remove the visual blocker immediately.  Waiting first leaves
+            # the red banner over the page for the entire backoff, and the
+            # next attempt then fails before it can tap the navigation entry.
             self._dismiss_network_popup()
+            self.log(f"检测到应用网络异常，{delay:g} 秒后自动重试当前号码（{attempt + 1}/{retries}）")
             # BatchWorker injects its interruptible wait here so the desktop
             # pause/stop controls remain responsive during a retry backoff.
             # Direct callers and existing tests keep the original time.sleep
@@ -844,10 +1232,29 @@ class MarketingAutomation:
             self._require_manual_login_if_needed()
         self._ensure_entry()
         field = self._wait_phone_input(timeout=10)
-        field.clear()
-        field.send_keys(phone)
+        # The network banner can arrive between locating the field and the
+        # actual input event. Check both sides of the send so a blocked input
+        # is retried as a network interruption instead of being reported as a
+        # misleading “号码不一致” navigation failure.
+        try:
+            field.clear()
+            field.send_keys(phone)
+        except Exception:
+            try:
+                self._raise_if_network_error()
+            except (NetworkUnavailableError, ManualLoginRequired):
+                raise
+            raise
         actual = str(field.get_attribute("text") or "")
         if re.sub(r"\D", "", actual) != phone:
+            try:
+                self._raise_if_network_error()
+            except (NetworkUnavailableError, ManualLoginRequired):
+                raise
+            except Exception:
+                # A transient Appium hierarchy read failure does not prove a
+                # network outage; retain the precise input-mismatch error.
+                pass
             raise NavigationError("输入框号码与当前 Excel 号码不一致，已停止跳转")
         self.log(f"已核对输入号码后四位 {phone[-4:]}，点击跳转")
         self._click_text("jump_button", timeout=10)

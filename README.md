@@ -26,7 +26,7 @@ v1.1 针对应用网络提示增加同号码自动重试、异常弹窗关闭和
 - 账号登录、短信验证码由使用者人工完成
 - 使用同一个 Appium 会话读取页面文字，避免重复启动 UiAutomator 导致手机操作中断
 - 默认信任手机当前页面，不在启动查询前主动判断登录状态，避免异步页面文案造成误判
-- 遇到应用“当前网络不可用”先关闭提示，并以 15 秒、30 秒退避重试当前号码；持续失败才暂停人工恢复
+- 遇到应用顶部红色“当前网络不可用”横幅或底部“网络连接超时，请稍后再试”提示，会先清除遮挡、等待页面稳定，并以 15 秒、30 秒退避重试当前号码；持续失败才暂停人工恢复
 
 ## 安装依赖
 
@@ -43,6 +43,8 @@ appium driver install uiautomator2
 python app.py
 ```
 
+新设备也可以直接双击发行包中的 `首次运行.command`。脚本会按需安装 Python、Java 17、Android Platform-Tools、Node.js、Appium 和 UiAutomator2，然后打开桌面应用；首次安装需要联网，并可能要求输入 macOS 密码。
+
 ### Windows 首次使用
 
 适配目标：Windows 10/11，Intel/AMD x64，安卓手机 Android 8 及以上。Windows ARM、32 位系统暂不支持此自动安装入口。Windows 运行时代码及模拟回归已检查；尚未在 Windows 真机完成首次安装和手机端到端验证。
@@ -54,7 +56,7 @@ python app.py
 
 下次仍双击 `run_windows.bat`。已有且完整的环境不会重复下载安装。安装失败会停在错误信息处，修复网络或权限后可重试；日志位于 `%LOCALAPPDATA%\MarketingAutomation\logs`。同时打开第二个启动窗口会提示使用已有窗口，避免并发安装和操作手机。
 
-脚本使用 Windows 自带的 PowerShell 5.1；缺失的 Python/Node/JDK 通过 WinGet 安装。若没有 WinGet，需先从 Microsoft Store 安装或更新“应用安装程序 (App Installer)”；企业禁用商店/软件安装时需管理员协助。手机品牌 USB 驱动若未被 Windows 自动识别，也需要人工安装。
+脚本使用 Windows 自带的 PowerShell 5.1。优先使用 WinGet；如果电脑没有 WinGet、Microsoft Store 被禁用或 WinGet 安装失败，脚本会自动从 Python.org、Node.js 和 Microsoft OpenJDK 官方地址下载用户目录内的便携运行时，不需要手动安装 WinGet，也不要求管理员权限。Android SDK、ADB、Appium 和 UiAutomator2 同样由脚本补齐。手机品牌 USB 驱动若未被 Windows 自动识别，仍需要人工安装。
 
 工具使用独立 `.venv-windows`，不会复用从 Mac 拷来的 `.venv`。Appium 3.7.0、UiAutomator2 8.6.4 安装在 `%LOCALAPPDATA%\MarketingAutomation\runtime`，SDK 默认位于 `%LOCALAPPDATA%\Android\Sdk`。启动时向本进程配置环境，不要求修改系统环境变量；不会改动已有的全局 Appium。安装过程会接受所安装软件和 Android SDK 的标准许可。
 
@@ -80,7 +82,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup_windows.ps1
 1. 点击“检测设备”，确认出现一台 `device` 状态的安卓设备；点击“唤醒应用”只唤醒现有任务，不主动重启登录页。
 2. 点击“下载 Excel 模板”生成手机号模板，或选择已有的 `工作簿200.xlsx`。
 3. 确认手机号列。无表头文件默认读取第一列，第二列作为姓名。
-4. 设置每条间隔、随机波动和每批暂停。
+4. 设置每条间隔、随机波动和每批暂停。界面默认每条间隔 30 秒、随机增加 5 秒，适合先以较保守的速度试跑。
 5. 第一次运行保持“先试运行 1 个号码”勾选，确认手机页面确实进入输入页、点击“跳转”并显示营销详情后，再取消勾选进行批量处理。应用会逐条进入“营销助手(免签入)”。
 6. 任务结束后点击“打开结果 Excel”，或在输入文件所在目录打开带时间戳的 `*_营销结果_*.xlsx`。结果工作簿的“营销详情”页按号码和“详情分段”保存完整滚动内容；同一号码的多段按段号顺序拼接即可恢复全文，“推荐明细”页保存可拆分的明细。
 
@@ -108,7 +110,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup_windows.ps1
 
 ### 页面要求重新登录或提示网络不可用
 
-手机显示该提示不一定代表整台手机断网：业务接口超时、账号凭证失效、公司网络/VPN不可达、Wi-Fi 与移动网络切换，都可能被应用统一显示为“当前网络不可用”。程序会先关闭该提示，并在 15 秒、30 秒后自动重试同一个号码，不会跳到下一号码。重试期间已进入详情页的内容仍会先写入恢复日志和 Excel。
+手机显示该提示不一定代表整台手机断网：业务接口超时、账号凭证失效、公司网络/VPN不可达、Wi-Fi 与移动网络切换，都可能被应用统一显示为“当前网络不可用”。程序会识别顶部红色横幅及底部超时 Toast；横幅会点击右上角关闭控件（无文字标签时按横幅坐标处理），Toast 则等待自然消失，不会误点详情页面。提示清除后在 15 秒、30 秒后自动重试同一个号码，不会跳到下一号码。重试期间已进入详情页的内容仍会先写入恢复日志和 Excel。
 
 如果两次重试后仍失败，程序会暂停本批任务并弹出提示，避免把其他号码写错。请在手机恢复业务网络并完成必要的重新登录，然后在同一个电脑应用窗口再次点击“开始处理”。输入文件及号码清单、试运行模式未变时，会继续原输出文件，跳过成功或明确无推荐的号码，重新处理未完成号码。修改输入清单、切换试运行模式或关闭后重开工具会创建新的输出文件。启动查询前默认不做登录状态预检；如需严格预检，可在 `config.json` 设置 `check_login_state: true`。
 
@@ -162,3 +164,14 @@ macOS 生成 `.app` 后可用 `pyinstaller --windowed` 配合签名和公证流�
 - 页面文案变化时，需要在 `config.json` 中调整选择器。
 - APK 的营销页面依赖远程 H5/网络服务，离线状态下无法读取推荐结果。
 - 第一版只查询和导出，不办理业务、不提交订单。
+
+### Windows 便携 EXE 构建（维护者）
+
+在一台可联网的 Windows 10/11 x64 构建机上，准备 Python 3.12 后，在项目目录执行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\build_windows_portable.ps1
+```
+
+脚本会下载 Node.js、Microsoft OpenJDK、Android Platform-Tools，并将 Appium 3.7.0 与 UiAutomator2 8.6.4 安装到 `runtime`，再用 PyInstaller 生成 `marketing-automation-windows-v1.1-portable.zip`。用户解压后直接双击 `MarketingAutomation-v1.1\MarketingAutomation-v1.1.exe`，不需要安装 Python、Node.js、Java、Android SDK、ADB 或 Appium。Android 手机的 USB ADB 驱动属于 Windows 系统驱动，仍需由系统/手机厂商提供并授权。

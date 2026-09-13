@@ -13,13 +13,14 @@
 
 ## 遇到问题
 
-- **提示没有 WinGet**：从 Microsoft Store 安装或更新“应用安装程序 (App Installer)”，然后再次双击启动。公司禁用软件安装时请联系管理员。
+- **第 4 步提示 `expanded\cmdline-tools\bin` 不存在**：旧脚本的临时目录加上 SDK 内部长文件名可能超过 Win10 传统路径限制。SDK 修正版使用已安装的 Python 解压，支持长路径，并验证 `sdkmanager.bat`、库文件和版本信息后才替换安装目录。将补丁中的 `windows_bootstrap.ps1`、`android_sdk_tools.py` 一起复制到 `run_windows.bat` 所在文件夹，覆盖同名文件后再次启动；已完成的 Python、Node.js、Java 会继续复用。不要删除 `%LOCALAPPDATA%\MarketingAutomation\runtime`。
+- **提示没有 WinGet**：新版脚本会自动改用 Python.org、Node.js 和 Microsoft OpenJDK 官方下载并安装到当前用户目录，无需先安装 WinGet 或管理员权限。若官方下载也失败，请检查代理/防火墙是否允许访问 `python.org`、`nodejs.org`、`aka.ms`、`dl.google.com`，修复后再次双击启动。
 - **下载失败**：检查电脑能否访问软件安装源、Google Android SDK 与 npm，恢复网络后重新运行。脚本会重新检查缺失组件。
 - **窗口报错**：保留错误提示，详细日志在 `%LOCALAPPDATA%\MarketingAutomation\logs`。不要删除已有 Excel 或同名 `.jsonl` 文件。
 - **提示已有窗口**：使用已打开的程序，不要重复运行启动脚本。
 - **未发现手机**：确认数据线、USB 调试授权；在设备管理器检查 Android ADB 驱动，必要时安装手机品牌官方驱动。
 - **没有业务 APK**：手机已经安装业务应用就无需再次安装；也可在电脑程序中选择 APK，或将安装包命名为 `wgt.apk` 放在程序目录。
-- **手机网络失效或掉登录**：在手机恢复网络并登录，然后在同一个电脑程序窗口点击“开始处理”继续。首次安装环境不会替你登录业务账号。
+- **手机网络失效或掉登录**：程序会先关闭可识别的网络横幅并重试当前号码；若仍失败，在手机恢复网络并登录，然后在同一个电脑程序窗口点击“开始处理”继续。首次安装环境不会替你登录业务账号。
 - **Excel 无法保存**：关闭正在占用结果文件的 Excel/WPS，再在同一个程序窗口继续。
 
 目前已通过代码回归和 Windows 行为模拟检查；尚未在 Windows 真机完成首次安装与手机全链路验证。此包是带自动环境安装的程序文件包，需要联网准备环境，不是离线免安装 EXE。

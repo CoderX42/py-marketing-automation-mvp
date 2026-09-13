@@ -16,8 +16,8 @@
     "detail_marker": "营销详情"
   },
   "timing": {
-    "between_records_seconds": 10,
-    "random_jitter_seconds": 3,
+    "between_records_seconds": 30,
+    "random_jitter_seconds": 5,
     "pause_every_records": 50,
     "pause_minutes": 2,
     "page_timeout_seconds": 30,

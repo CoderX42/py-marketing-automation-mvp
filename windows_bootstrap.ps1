@@ -3,6 +3,11 @@ $ErrorActionPreference = 'Stop'
 $script:AppiumVersion = '3.7.0'
 $script:DriverVersion = '8.6.4'
 $script:RuntimeRoot = Join-Path $env:LOCALAPPDATA 'MarketingAutomation\runtime'
+$script:PythonZipUrl = 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.zip'
+$script:PythonZipSha256 = '8649692de846c56a7189d6dae5c322ab20deb1b5908b6f39426b62a36f39415d'
+$script:NodeZipUrl = 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip'
+$script:NodeZipSha256 = '55b639295920b219bb2acbcfa00f90393a2789095b7323f79475c9f34795f217'
+$script:JavaZipUrl = 'https://aka.ms/download-jdk/microsoft-jdk-17-windows-x64.zip'
 
 function Invoke-Checked {
     param([string]$File, [string[]]$Arguments, [string]$Description)
@@ -18,18 +23,132 @@ function Update-ProcessPath {
     $env:Path = "$machinePath;$userPath;$env:Path"
 }
 
-function Install-WithWinget {
-    param([string]$Id)
-    if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
-        throw '电脑缺少 WinGet。请从 Microsoft Store 安装/更新“应用安装程序 (App Installer)”后重试：https://aka.ms/getwinget；公司电脑可能需要联系管理员。'
+function Invoke-Download {
+    param(
+        [string]$Url,
+        [string]$Destination,
+        [string]$Description,
+        [string]$Sha256,
+        [int64]$MinimumBytes = 1048576,
+        [ValidateSet('SHA256', 'SHA1')][string]$HashAlgorithm = 'SHA256'
+    )
+    $parent = Split-Path -Parent $Destination
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    $valid = $false
+    if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+        try {
+            $item = Get-Item -LiteralPath $Destination
+            if ($item.Length -ge $MinimumBytes) {
+                if ($Sha256) {
+                    $valid = (Get-FileHash -LiteralPath $Destination -Algorithm $HashAlgorithm).Hash.ToLowerInvariant() -eq $Sha256.ToLowerInvariant()
+                } else { $valid = $true }
+            }
+        } catch { $valid = $false }
     }
-    Write-Host "正在安装 $Id，系统可能弹出安装授权提示…" -ForegroundColor Cyan
-    Invoke-Checked 'winget.exe' @('install', '--id', $Id, '--exact', '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements', '--silent', '--disable-interactivity') $Id
-    Update-ProcessPath
+    if ($valid) { return $Destination }
+    if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue }
+    $partial = "$Destination.partial"
+    if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue }
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Write-Host "$Description（第 $attempt/3 次）…" -ForegroundColor Cyan
+            Invoke-WebRequest -Uri $Url -OutFile $partial -UseBasicParsing -TimeoutSec 180
+            if (-not (Test-Path -LiteralPath $partial -PathType Leaf)) { throw '下载文件不存在。' }
+            $item = Get-Item -LiteralPath $partial
+            if ($item.Length -lt $MinimumBytes) { throw "下载文件过小（$($item.Length) 字节）。" }
+            if ($Sha256) {
+                $actual = (Get-FileHash -LiteralPath $partial -Algorithm $HashAlgorithm).Hash.ToLowerInvariant()
+                if ($actual -ne $Sha256.ToLowerInvariant()) { throw '下载文件校验值不匹配。' }
+            }
+            Move-Item -LiteralPath $partial -Destination $Destination -Force
+            return $Destination
+        } catch {
+            $lastError = $_.Exception.Message
+            if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (2 * $attempt) }
+        }
+    }
+    throw "$Description 下载失败：$lastError。请检查网络代理后重新运行。"
+}
+
+function Try-Install-WithWinget {
+    param([string]$Id)
+    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if (-not $winget) { return $false }
+    try {
+        Write-Host "正在通过 WinGet 安装 $Id；失败时将自动切换官方下载…" -ForegroundColor Cyan
+        Invoke-Checked $winget.Source @('install', '--id', $Id, '--exact', '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements', '--silent', '--disable-interactivity') $Id
+        Update-ProcessPath
+        return $true
+    } catch {
+        Write-Warning "WinGet 安装 $Id 失败，将切换官方下载：$($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Install-PythonDirect {
+    $zip = Join-Path $script:RuntimeRoot 'downloads\python-3.12.10-amd64.zip'
+    $target = Join-Path $script:RuntimeRoot 'python312'
+    Invoke-Download $script:PythonZipUrl $zip '正在下载 Python 3.12（官方下载）' $script:PythonZipSha256 20000000 | Out-Null
+    $staging = Join-Path $script:RuntimeRoot ('python-extract-' + [guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType Directory -Force -Path $staging | Out-Null
+        Expand-Archive -LiteralPath $zip -DestinationPath $staging -Force
+        if (-not (Test-Path -LiteralPath (Join-Path $staging 'python.exe'))) { throw 'Python 压缩包中未找到 python.exe。' }
+        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+        Move-Item -LiteralPath $staging -Destination $target
+    } finally {
+        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    }
+    Write-Host "Python 已安装到 $target（无需 WinGet 或管理员权限）。" -ForegroundColor Green
+}
+
+function Install-NodeDirect {
+    $zip = Join-Path $script:RuntimeRoot 'downloads\node-v22.14.0-win-x64.zip'
+    $target = Join-Path $script:RuntimeRoot 'nodejs'
+    Invoke-Download $script:NodeZipUrl $zip '正在下载 Node.js 22（官方下载）' $script:NodeZipSha256 20000000 | Out-Null
+    $staging = Join-Path $script:RuntimeRoot ('node-extract-' + [guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType Directory -Force -Path $staging | Out-Null
+        Expand-Archive -LiteralPath $zip -DestinationPath $staging -Force
+        $payload = Get-ChildItem -LiteralPath $staging -Directory | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'node.exe') } | Select-Object -First 1
+        if (-not $payload) { throw 'Node.js 压缩包中未找到 node.exe。' }
+        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+        Move-Item -LiteralPath $payload.FullName -Destination $target
+    } finally {
+        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    }
+    Write-Host "Node.js 已安装到 $target（无需 WinGet 或管理员权限）。" -ForegroundColor Green
+}
+
+function Install-JavaDirect {
+    $zip = Join-Path $script:RuntimeRoot 'downloads\microsoft-jdk-17-windows-x64.zip'
+    $target = Join-Path $script:RuntimeRoot 'java'
+    Invoke-Download $script:JavaZipUrl $zip '正在下载 Microsoft OpenJDK 17（官方下载）' $null 50000000 | Out-Null
+    $staging = Join-Path $script:RuntimeRoot ('java-extract-' + [guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType Directory -Force -Path $staging | Out-Null
+        Expand-Archive -LiteralPath $zip -DestinationPath $staging -Force
+        $javac = Get-ChildItem -LiteralPath $staging -Filter 'javac.exe' -Recurse -File | Select-Object -First 1
+        if (-not $javac) { throw 'JDK 压缩包中未找到 javac.exe。' }
+        $payload = Split-Path (Split-Path $javac.FullName -Parent) -Parent
+        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+        Move-Item -LiteralPath $payload -Destination $target
+    } catch {
+        # The Microsoft alias is intentionally cached, but never keep a bad
+        # archive after an interrupted download or proxy error.
+        if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue }
+        throw
+    } finally {
+        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    }
+    Write-Host "Java JDK 17 已安装到 $target（无需 WinGet 或管理员权限）。" -ForegroundColor Green
 }
 
 function Find-Python {
     $candidates = @(
+        (Join-Path $script:RuntimeRoot 'python312\python.exe'),
         (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe'),
         (Join-Path $env:ProgramFiles 'Python312\python.exe')
     )
@@ -50,7 +169,10 @@ function Find-Python {
 }
 
 function Find-Node {
-    $candidates = @((Join-Path $env:ProgramFiles 'nodejs\node.exe'))
+    $candidates = @(
+        (Join-Path $script:RuntimeRoot 'nodejs\node.exe'),
+        (Join-Path $env:ProgramFiles 'nodejs\node.exe')
+    )
     $command = Get-Command node.exe -ErrorAction SilentlyContinue
     if ($command) { $candidates += $command.Source }
     foreach ($candidate in $candidates) {
@@ -64,6 +186,7 @@ function Find-Node {
 
 function Find-JavaHome {
     $roots = @($env:JAVA_HOME, [Environment]::GetEnvironmentVariable('JAVA_HOME', 'User'), [Environment]::GetEnvironmentVariable('JAVA_HOME', 'Machine'))
+    $roots += Join-Path $script:RuntimeRoot 'java'
     $roots += @(Get-ChildItem -Path (Join-Path $env:ProgramFiles 'Microsoft\jdk-17*') -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
     $javac = Get-Command javac.exe -ErrorAction SilentlyContinue
     if ($javac) { $roots += Split-Path (Split-Path $javac.Source -Parent) -Parent }
@@ -80,32 +203,38 @@ function Find-JavaHome {
 
 function Install-AndroidTools {
     param([string]$SdkRoot)
-    $manager = Join-Path $SdkRoot 'cmdline-tools\19.0\bin\sdkmanager.bat'
+    $destination = Join-Path $SdkRoot 'cmdline-tools\19.0'
+    $manager = Join-Path $destination 'bin\sdkmanager.bat'
     $adb = Join-Path $SdkRoot 'platform-tools\adb.exe'
     $signer = Join-Path $SdkRoot 'build-tools\35.0.0\apksigner.bat'
     if ((Test-Path -LiteralPath $adb) -and (Test-Path -LiteralPath $signer) -and
         (Test-Path -LiteralPath (Join-Path $SdkRoot 'platform-tools\package.xml')) -and
         (Test-Path -LiteralPath (Join-Path $SdkRoot 'build-tools\35.0.0\lib\apksigner.jar'))) { return }
-    if (-not (Test-Path -LiteralPath $manager)) {
-        Write-Host '正在从 Google 下载 Android 命令行工具…' -ForegroundColor Cyan
-        $staging = Join-Path $script:RuntimeRoot ('android-download-' + [guid]::NewGuid().ToString('N'))
-        New-Item -ItemType Directory -Force -Path $staging | Out-Null
-        try {
-            [xml]$repository = (Invoke-WebRequest 'https://dl.google.com/android/repository/repository2-1.xml' -UseBasicParsing).Content
-            $archive = $repository.SelectSingleNode("//*[local-name()='remotePackage' and @path='cmdline-tools;19.0']/*[local-name()='archives']/*[local-name()='archive'][*[local-name()='host-os']='windows']/*[local-name()='complete']")
-            if (-not $archive) { throw 'Google SDK 清单中未找到 Windows 命令行工具 19.0。' }
-            $filename = [string]$archive.url
-            if ($filename -notmatch '^commandlinetools-win-[0-9]+_latest\.zip$') { throw 'Android 下载地址不符合官方文件格式。' }
-            $zip = Join-Path $staging 'tools.zip'
-            Invoke-WebRequest ("https://dl.google.com/android/repository/" + $filename) -OutFile $zip -UseBasicParsing
-            if ((Get-FileHash -LiteralPath $zip -Algorithm SHA1).Hash -ne [string]$archive.checksum) { throw 'Android 下载文件校验失败，请检查网络后重试。' }
-            Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $staging 'expanded')
-            $destination = Join-Path $SdkRoot 'cmdline-tools\19.0'
-            New-Item -ItemType Directory -Force -Path $destination | Out-Null
-            Copy-Item -Path (Join-Path $staging 'expanded\cmdline-tools\*') -Destination $destination -Recurse -Force
-        } finally {
-            if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    $toolsComplete = (Test-Path -LiteralPath $manager -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $destination 'lib\sdkmanager-classpath.jar') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $destination 'source.properties') -PathType Leaf)
+    if (-not $toolsComplete) {
+        $python = Find-Python
+        if (-not $python) { throw '请先完成第 1 步 Python 环境检查。' }
+        $extractor = Join-Path $PSScriptRoot 'android_sdk_tools.py'
+        if (-not (Test-Path -LiteralPath $extractor -PathType Leaf)) {
+            throw '更新文件不完整：请将 android_sdk_tools.py 与 windows_bootstrap.ps1 一起放到 run_windows.bat 所在文件夹。'
         }
+        Write-Host '正在读取 Android 命令行工具下载信息…' -ForegroundColor Cyan
+        [xml]$repository = (Invoke-WebRequest 'https://dl.google.com/android/repository/repository2-1.xml' -UseBasicParsing).Content
+        $archive = $repository.SelectSingleNode("//*[local-name()='remotePackage' and @path='cmdline-tools;19.0']/*[local-name()='archives']/*[local-name()='archive'][*[local-name()='host-os']='windows']/*[local-name()='complete']")
+        if (-not $archive) { throw 'Google SDK 清单中未找到 Windows 命令行工具 19.0。' }
+        $filename = [string]$archive.url
+        if ($filename -notmatch '^commandlinetools-win-[0-9]+_latest\.zip$') { throw 'Android 下载地址不符合官方文件格式。' }
+        # Keep a verified download between attempts. Do not use PS 5.1
+        # Expand-Archive here: deep Java paths plus the old GUID staging path
+        # can exceed MAX_PATH and leave a misleading "bin not found" error.
+        $zip = Join-Path (Join-Path $script:RuntimeRoot 'downloads') $filename
+        Invoke-Download -Url ("https://dl.google.com/android/repository/" + $filename) `
+            -Destination $zip -Description '正在下载 Android 命令行工具（官方下载）' `
+            -Sha256 ([string]$archive.checksum) -HashAlgorithm SHA1 -MinimumBytes ([int64]$archive.size) | Out-Null
+        Write-Host '正在使用 Python 解压 Android 工具并检查目录完整性…' -ForegroundColor Cyan
+        Invoke-Checked $python @($extractor, $zip, $destination, '--sha1', [string]$archive.checksum) 'Android 命令行工具解压'
     }
     Write-Host '正在安装 Android Platform-Tools 和 Build-Tools；首次安装会接受所需 SDK 许可。' -ForegroundColor Cyan
     $answers = 1..30 | ForEach-Object { 'y' }
@@ -126,12 +255,20 @@ function Initialize-WindowsEnvironment {
 
     Write-Host '[1/6] Python'
     $python = Find-Python
-    if (-not $python) { Install-WithWinget 'Python.Python.3.12'; $python = Find-Python }
+    if (-not $python) {
+        if (-not (Try-Install-WithWinget 'Python.Python.3.12')) { Install-PythonDirect }
+        $python = Find-Python
+    }
+    if (-not $python) { Install-PythonDirect; $python = Find-Python }
     if (-not $python) { throw '未找到可用的 64 位 Python 3.10–3.12，请安装 Python 3.12 后重试。' }
 
     Write-Host '[2/6] Node.js / npm'
     $node = Find-Node
-    if (-not $node) { Install-WithWinget 'OpenJS.NodeJS.LTS'; $node = Find-Node }
+    if (-not $node) {
+        if (-not (Try-Install-WithWinget 'OpenJS.NodeJS.LTS')) { Install-NodeDirect }
+        $node = Find-Node
+    }
+    if (-not $node) { Install-NodeDirect; $node = Find-Node }
     if (-not $node) { throw 'Node.js 版本不满足 Appium 要求，请安装当前 Node.js LTS 后重试。' }
     $nodeDirectory = Split-Path $node -Parent
     $env:Path = "$nodeDirectory;$env:Path"
@@ -142,7 +279,11 @@ function Initialize-WindowsEnvironment {
 
     Write-Host '[3/6] Java JDK'
     $javaHome = Find-JavaHome
-    if (-not $javaHome) { Install-WithWinget 'Microsoft.OpenJDK.17'; $javaHome = Find-JavaHome }
+    if (-not $javaHome) {
+        if (-not (Try-Install-WithWinget 'Microsoft.OpenJDK.17')) { Install-JavaDirect }
+        $javaHome = Find-JavaHome
+    }
+    if (-not $javaHome) { Install-JavaDirect; $javaHome = Find-JavaHome }
     if (-not $javaHome) { throw '未找到 Java JDK 17 或以上版本，请检查 Java 安装。' }
     $env:JAVA_HOME = $javaHome
     $env:Path = "$javaHome\bin;$env:Path"

@@ -17,10 +17,15 @@ def subprocess_options() -> dict:
     return {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 
 
+def _bundled_runtime_root() -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / "runtime"
+
+
 def adb_candidates() -> list[Path]:
     """Search standard SDK locations even when Finder omits shell PATH entries."""
     executable = "adb.exe" if sys.platform == "win32" else "adb"
-    candidates = []
+    candidates = [_bundled_runtime_root() / "android-sdk" / "platform-tools" / executable]
     for variable in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
         sdk = os.environ.get(variable)
         if sdk:

@@ -12,6 +12,38 @@ from pathlib import Path
 from device import AdbError, resolve_adb, subprocess_options
 
 
+def bundled_runtime_root() -> Path:
+    """Return the portable runtime directory shipped beside the app.
+
+    PyInstaller one-dir and one-file builds both expose ``sys._MEIPASS``
+    while running; source launches use the project directory.
+    """
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / "runtime"
+
+
+def configure_bundled_runtime() -> None:
+    runtime = bundled_runtime_root()
+    node = runtime / "node"
+    java = runtime / "java"
+    npm = runtime / "npm"
+    sdk = runtime / "android-sdk"
+    if node.is_dir():
+        os.environ["PATH"] = os.pathsep.join([str(node), os.environ.get("PATH", "")])
+    if java.is_dir() and (java / "bin" / ("java.exe" if sys.platform == "win32" else "java")).is_file():
+        os.environ["JAVA_HOME"] = str(java)
+        os.environ["PATH"] = os.pathsep.join([str(java / "bin"), os.environ.get("PATH", "")])
+    if npm.is_dir():
+        os.environ["NPM_CONFIG_PREFIX"] = str(npm)
+        os.environ["APPIUM_HOME"] = str(runtime / "appium-home")
+    if sdk.is_dir():
+        # The packaged SDK is self-contained and takes precedence over any
+        # stale machine-level Android SDK variables.
+        os.environ["ANDROID_HOME"] = str(sdk)
+        os.environ["ANDROID_SDK_ROOT"] = str(sdk)
+
+
+
 class AppiumServerError(RuntimeError):
     pass
 
@@ -22,7 +54,7 @@ def configure_android_sdk() -> str | None:
         value = os.environ.get(variable)
         if value:
             roots.append(Path(value).expanduser())
-    roots.extend([Path.home() / "Library/Android/sdk", Path.home() / "Android/Sdk"])
+    roots.extend([bundled_runtime_root() / "android-sdk", Path.home() / "Library/Android/sdk", Path.home() / "Android/Sdk"])
     if os.environ.get("LOCALAPPDATA"):
         roots.append(Path(os.environ["LOCALAPPDATA"]) / "Android/Sdk")
     roots.append(Path.home() / "AppData/Local/Android/Sdk")
@@ -52,6 +84,9 @@ def resolve_appium() -> str | None:
         configured = Path(os.environ["NPM_CONFIG_PREFIX"]) / "appium.cmd"
         if configured.is_file():
             return str(configured)
+    bundled = bundled_runtime_root() / "npm" / ("appium.cmd" if sys.platform == "win32" else "appium")
+    if bundled.is_file():
+        return str(bundled)
     command = shutil.which("appium.cmd" if sys.platform == "win32" else "appium")
     if command:
         return command
@@ -78,6 +113,9 @@ def appium_launch_command(command: str) -> list[str]:
     prefix = Path(command).parent
     entry = prefix / "node_modules/appium/index.js"
     node = shutil.which("node.exe")
+    bundled_node = bundled_runtime_root() / "node" / "node.exe"
+    if not node and bundled_node.is_file():
+        node = str(bundled_node)
     if not node and (prefix / "node.exe").is_file():
         node = str(prefix / "node.exe")
     if not node or not entry.is_file():
@@ -99,6 +137,7 @@ class AppiumServer:
             return False
 
     def ensure(self) -> None:
+        configure_bundled_runtime()
         sdk_root = configure_android_sdk()
         if not sdk_root:
             raise AppiumServerError("未找到 Android SDK 根目录。请先安装 Android Platform-Tools，或设置 ANDROID_HOME。")

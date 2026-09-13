@@ -186,8 +186,8 @@ class BatchWorker(QObject):
             automation.connect()
             self.message.emit("手机自动化已连接，开始检查页面与查询入口")
             timing = self.config.get("timing", {})
-            base_delay = float(timing.get("between_records_seconds", 10))
-            jitter = float(timing.get("random_jitter_seconds", 3))
+            base_delay = float(timing.get("between_records_seconds", 30))
+            jitter = float(timing.get("random_jitter_seconds", 5))
             pause_every = int(timing.get("pause_every_records", 50))
             pause_seconds = int(timing.get("pause_minutes", 2) * 60)
             consecutive_failures = 0
@@ -390,8 +390,10 @@ class MainWindow(QMainWindow):
 
         settings = QGroupBox("③  执行策略")
         settings_form = QGridLayout(settings); settings_form.setContentsMargins(18, 16, 18, 16); settings_form.setHorizontalSpacing(24); settings_form.setVerticalSpacing(12)
-        self.interval = QSpinBox(); self.interval.setRange(1, 300); self.interval.setValue(10); self.interval.setSuffix(" 秒")
-        self.jitter = QSpinBox(); self.jitter.setRange(0, 60); self.jitter.setValue(3); self.jitter.setSuffix(" 秒")
+        self.interval = QSpinBox(); self.interval.setRange(1, 300); self.interval.setValue(30); self.interval.setSuffix(" 秒")
+        self.interval.setToolTip("默认 30 秒；建议批量查询保持 30 秒以上，降低业务接口限流概率")
+        self.jitter = QSpinBox(); self.jitter.setRange(0, 60); self.jitter.setValue(5); self.jitter.setSuffix(" 秒")
+        self.jitter.setToolTip("每条间隔在基础值上随机增加 0 至设定秒数")
         self.batch_count = QSpinBox(); self.batch_count.setRange(0, 10000); self.batch_count.setValue(50); self.batch_count.setSuffix(" 条，0 表示不暂停")
         self.batch_pause = QSpinBox(); self.batch_pause.setRange(0, 120); self.batch_pause.setValue(2); self.batch_pause.setSuffix(" 分钟")
         settings_form.addWidget(QLabel("每条基础间隔"), 0, 0); settings_form.addWidget(self.interval, 0, 1)
