@@ -491,9 +491,67 @@ class MarketingAutomation:
                     pass
         raise TimeoutError("找不到手机号输入框")
 
+    def _adb_phone_input(self):
+        """Return input/button bounds when Appium cannot read the WebView tree."""
+        root = self._adb_ui_root_from_adb()
+        if root is None:
+            return None
+        labels = self._root_text(root)
+        entry = self._normal_text(self._text("marketing_entry"))
+        if not any(self._normal_text(label) in {entry, self._normal_text("营销详情免签入")}
+                   for label in labels):
+            return None
+        input_bounds = None
+        jump_bounds = None
+        for node in root.iter():
+            bounds = self._node_bounds(node)
+            if not bounds or node.get("enabled") == "false":
+                continue
+            if node.get("class") == "android.widget.EditText" and input_bounds is None:
+                input_bounds = bounds
+            if self._normal_text(self._node_label(node)) == self._normal_text(self._text("jump_button")):
+                jump_bounds = bounds
+        if input_bounds and jump_bounds:
+            return {"adb": True, "input_bounds": input_bounds, "jump_bounds": jump_bounds}
+        return None
+
+    def _adb_tap_bounds(self, bounds) -> bool:
+        left, top, right, bottom = bounds
+        return self._adb_tap_xy((left + right) // 2, (top + bottom) // 2)
+
+    def _adb_enter_phone(self, field, phone: str) -> None:
+        """Type a phone and press jump using ADB when Appium WebView is stalled."""
+        if not self._adb_tap_bounds(field["input_bounds"]):
+            raise NavigationError("无法点击手机号输入框")
+        adb = self._adb_path()
+        if not adb:
+            raise NavigationError("未找到 ADB，无法输入手机号")
+        result = subprocess.run([adb, "shell", "input", "text", phone], check=False,
+                                capture_output=True, text=True, timeout=8,
+                                **subprocess_options())
+        if result.returncode != 0:
+            raise NavigationError("输入手机号失败，请检查 USB 调试连接")
+        time.sleep(.4)
+        if not self._adb_tap_bounds(field["jump_bounds"]):
+            raise NavigationError("无法点击手机号页面的跳转按钮")
+
     def _wait_phone_input(self, timeout: int = 10):
         end = time.time() + timeout
         last_error = None
+        # The native XML dump remains responsive on Honor while Appium's
+        # page_source request can block for its full HTTP timeout. Locate the
+        # two controls through ADB first so a ready page proceeds immediately.
+        if getattr(self, "_prefer_adb_home_tab", False) and getattr(self, "_device_serial", None):
+            getattr(self, "log", lambda _msg: None)("正在等待营销助手手机号输入框加载…")
+            while time.time() < end:
+                try:
+                    field = self._adb_phone_input()
+                    if field:
+                        getattr(self, "log", lambda _msg: None)("已通过 ADB 定位手机号输入框和跳转按钮")
+                        return field
+                except Exception as exc:
+                    last_error = exc
+                time.sleep(.4)
         # Try direct element selectors first. On Honor devices the full
         # accessibility source can block while this H5 page is loading even
         # though the phone input and jump controls are already usable.
@@ -816,9 +874,18 @@ class MarketingAutomation:
         self.log("已确认免签入手机号输入页")
 
     def _verify_free_entry_title(self) -> None:
-        self._dismiss_network_popup()
+        if getattr(self, "_prefer_adb_home_tab", False) and getattr(self, "_device_serial", None):
+            # Avoid a page_source read here; it can block while this H5 page
+            # is loading. The ADB dump below is sufficient for the title.
+            pass
+        else:
+            self._dismiss_network_popup()
         try:
-            root = self._adb_ui_root()
+            # Prefer the ADB hierarchy on Honor WebView pages; Appium's
+            # page_source may remain blocked even though the title is visible.
+            root = (self._adb_ui_root_from_adb()
+                    if getattr(self, "_prefer_adb_home_tab", False) and getattr(self, "_device_serial", None)
+                    else self._adb_ui_root())
         except Exception:
             # The Honor WebView can reject full XML reads while text selectors
             # continue to respond.  Use the direct marker fallback here so a
@@ -881,7 +948,9 @@ class MarketingAutomation:
 
     def _swipe_detail(self, direction: str) -> None:
         """Slow overlapping drags: fast flings can skip whole recommendation cards."""
-        root = self._adb_ui_root()
+        root = (self._adb_ui_root_from_adb()
+                if getattr(self, "_prefer_adb_home_tab", False) and getattr(self, "_device_serial", None)
+                else self._adb_ui_root())
         size = self.driver.get_window_size()
         width, height = int(size["width"]), int(size["height"])
         bounds = [self._node_bounds(n) for n in root.iter()
@@ -941,10 +1010,17 @@ class MarketingAutomation:
         return re.sub(r"[\ue000-\uf8ff]", "", text).strip()
 
     def _detail_snapshot(self):
-        try:
-            root = self._adb_ui_root()
-        except Exception:
-            root = self._direct_elements_root()
+        if getattr(self, "_prefer_adb_home_tab", False) and getattr(self, "_device_serial", None):
+            root = self._adb_ui_root_from_adb()
+        else:
+            try:
+                root = self._adb_ui_root()
+            except Exception:
+                # ADB's dump remains responsive when the Appium WebView source
+                # is stalled. It also preserves visible text for export.
+                root = self._adb_ui_root_from_adb()
+                if root is None:
+                    root = self._direct_elements_root()
         if root is None:
             raise NavigationError("无法读取营销详情页面")
         all_text = self._root_text(root)
@@ -1067,9 +1143,11 @@ class MarketingAutomation:
         last_text = []
         while time.monotonic() < deadline:
             try:
-                root = self._adb_ui_root()
+                root = (self._adb_ui_root_from_adb()
+                        if getattr(self, "_prefer_adb_home_tab", False) and getattr(self, "_device_serial", None)
+                        else self._adb_ui_root())
             except Exception:
-                root = self._direct_label_root()
+                root = self._adb_ui_root_from_adb() or self._direct_label_root()
             if root is None:
                 time.sleep(.5)
                 continue
@@ -1603,6 +1681,41 @@ class MarketingAutomation:
             self._require_manual_login_if_needed()
         self._ensure_entry()
         field = self._wait_phone_input(timeout=10)
+        if isinstance(field, dict) and field.get("adb"):
+            self._adb_enter_phone(field, phone)
+            self.log(f"已通过 ADB 输入号码后四位 {phone[-4:]} 并点击跳转")
+            detail_timeout = int(self.config.get("timing", {}).get("page_timeout_seconds", 60))
+            initial, business_error = self._wait_detail_or_error(detail_timeout)
+            if business_error:
+                self._click_if_present("confirm_button", timeout=2)
+                return {"phone": phone, "status": "empty", "items": [], "raw_text": "\n".join(initial),
+                        "error": business_error, "query_time": self._query_time}
+            if not any(self._normal_text(t) == self._normal_text(self._text("detail_marker")) for t in initial):
+                raise TimeoutError("营销详情加载超时")
+            self._record_detail(initial)
+            self.log("已进入营销详情页，等待推荐正文加载")
+            try:
+                deadline = time.monotonic() + detail_timeout
+                while True:
+                    lines, _ = self._detail_snapshot()
+                    self._record_detail(lines)
+                    if self._has_detail_body(lines):
+                        time.sleep(1)
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("营销详情仅加载了标题，尚未获得正文")
+                    time.sleep(.7)
+                max_scrolls = max(10, min(int(self.config.get("timing", {}).get("detail_max_scrolls", 80)), 200))
+                self._collect_detail_text(max_scrolls)
+                return self._detail_result(complete=self._collection_complete)
+            except Exception as exc:
+                if getattr(exc, "is_persistence_error", False):
+                    raise
+                interruption_type = ("network" if isinstance(exc, NetworkUnavailableError)
+                                     else "login" if isinstance(exc, ManualLoginRequired) else "")
+                return self._detail_result(error=str(exc).split("Stacktrace:")[0],
+                                           session_interrupted=bool(interruption_type),
+                                           interruption_type=interruption_type)
         # The network banner can arrive between locating the field and the
         # actual input event. Check both sides of the send so a blocked input
         # is retried as a network interruption instead of being reported as a
