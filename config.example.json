@@ -23,6 +23,8 @@
     "page_timeout_seconds": 30,
     "detail_max_scrolls": 80,
     "network_retries": 2,
-    "network_retry_seconds": 15
+    "network_retry_seconds": 15,
+    "uiautomator2_install_timeout_seconds": 120,
+    "adb_exec_timeout_seconds": 120
   }
 }

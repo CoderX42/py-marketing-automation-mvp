@@ -49,8 +49,12 @@ DEFAULT_APK = ROOT / "wgt.apk"
 
 def readable_automation_error(error: Exception) -> str:
     raw = re.sub(r"(?<!\d)(1\d{2})\d{4}(\d{4})(?!\d)", r"\1****\2", str(error))
+    if "INSTALL_FAILED_ABORTED" in raw or "User rejected permissions" in raw:
+        return "手机端弹出了 UiAutomator2 辅助服务安装确认，但安装未获批准。请保持手机解锁，在弹窗中点击“了解风险/允许安装”（不要点取消），并在开发者选项开启“USB 调试（安全设置）/通过 USB 安装”后重试。"
     if "INSTALL_FAILED_USER_RESTRICTED" in raw or "Install canceled by user" in raw:
         return "手机阻止了 Appium 辅助服务安装。请在小米手机开发者选项打开“USB 调试（安全设置）/通过 USB 安装”，解锁手机并确认安装授权弹窗后重试。"
+    if "uiautomator2ServerInstallTimeout" in raw or "timed out after 20000ms" in raw:
+        return "手机端 UiAutomator2 辅助服务安装超时。请保持手机解锁并确认安装弹窗，检查 USB 线连接后重试；新版已将安装等待时间延长到 120 秒。"
     if "WRITE_SECURE_SETTINGS" in raw or "hidden_api_policy" in raw:
         return "手机系统拒绝隐藏 API 设置，已启用兼容模式；请重新运行任务。"
     if "ANDROID_HOME" in raw or "ANDROID_SDK_ROOT" in raw:

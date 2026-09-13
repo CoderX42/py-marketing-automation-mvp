@@ -86,6 +86,16 @@ class MarketingAutomation:
         # phone/network failure on the following record.
         pause_seconds = float(self.config.get("timing", {}).get("pause_minutes", 2)) * 60
         options.new_command_timeout = max(600, int(pause_seconds + 120))
+        # Installing the UiAutomator2 helper APK can trigger a security
+        # confirmation on Xiaomi/HyperOS devices.  The default Appium timeout
+        # is only 20 seconds, which is too short when the user must approve
+        # the prompt or when the phone is busy.  Keep this configurable while
+        # using a forgiving default for the desktop workflow.
+        install_timeout = int(self.config.get("timing", {}).get("uiautomator2_install_timeout_seconds", 120))
+        adb_timeout = int(self.config.get("timing", {}).get("adb_exec_timeout_seconds", 120))
+        options.set_capability("appium:uiautomator2ServerInstallTimeout", max(30, install_timeout) * 1000)
+        options.set_capability("appium:uiautomator2ServerLaunchTimeout", max(30, install_timeout) * 1000)
+        options.set_capability("appium:adbExecTimeout", max(30, adb_timeout) * 1000)
         # 部分小米/国产 ROM 拒绝 settings delete global hidden_api_policy。
         # 该选项让 UiAutomator2 忽略这一步，不影响普通自动化能力。
         options.set_capability("appium:ignoreHiddenApiPolicyError", True)
