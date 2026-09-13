@@ -111,6 +111,8 @@ class MarketingAutomation:
             if self._uiautomator_server_is_installed(serial):
                 options.set_capability("appium:skipServerInstallation", True)
                 self.log("已检测到 UiAutomator2 辅助服务，跳过重复安装")
+            else:
+                self.log("手机尚未完整安装 UiAutomator2 辅助服务，首次启动请确认手机上的两个安装弹窗")
         options.no_reset = True
         # Attach to the page the user already opened. Launching SplashActivity
         # for every desktop run can route an otherwise valid session to login.
