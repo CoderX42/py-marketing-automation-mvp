@@ -29,7 +29,7 @@
 - **找不到设备**：在终端执行 `adb devices`，确认状态为 `device`；若为 `unauthorized`，解锁手机并重新允许调试。
 - **应用提示网络不可用**：保持稳定的业务网络。v1.1 会先清除顶部红色横幅、等待底部超时提示消失，再重试当前号码；持续失败会暂停并保存已采集内容，恢复网络或重新登录后在同一窗口点击“开始处理”。
 - **直接双击应用后提示缺少 ADB/Appium**：关闭应用，运行 `首次运行.command` 完成环境安装。
-- **每次开始处理都弹出 UiAutomator2 安装确认**：电脑上 npm 安装的 UiAutomator2 驱动不等于手机上的辅助 APK。首次请在手机上确认 `io.appium.uiautomator2.server` 和 `io.appium.uiautomator2.server.test` 两个安装弹窗，并保持手机解锁；两者都安装成功后，程序会自动检测并跳过重复安装。
+- **每次开始处理都弹出 UiAutomator2/Appium Settings 安装确认**：电脑上 npm 安装的 UiAutomator2 驱动不等于手机上的辅助 APK。首次请在手机上确认 `io.appium.uiautomator2.server`、`io.appium.uiautomator2.server.test` 和 `Appium Settings` 安装提示，并保持手机解锁；辅助包安装成功后，v1.1 会自动检测并跳过重复安装。若仍反复弹窗，请关闭旧版应用，更新到仓库最新代码后再运行 `run_mac.command`。
 - **Intel Mac 无法打开**：请确认使用发行包中的通用版应用；在“关于本机”查看芯片类型。通用版同时支持 Intel 和 Apple Silicon。
 
 详细的 ADB 操作和网络排查步骤见 `ADB连接操作文档.md`。
