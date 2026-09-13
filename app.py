@@ -540,7 +540,7 @@ class MainWindow(QMainWindow):
             "app_activity": "com.sh.cm.grid4a.SplashActivity",
             "appium_url": "http://127.0.0.1:4723/wd/hub",
             "selectors": {"home_marker": "个人业务", "smart_marketing_tab": "智慧营销", "full_view_marker": "全景视图", "login_marker": "立即登录", "marketing_entry": "营销助手(免签入)", "phone_input_hint": "手机号码", "jump_button": "跳转", "confirm_button": "确定", "detail_marker": "营销详情"},
-            "timing": {"between_records_seconds": self.interval.value(), "random_jitter_seconds": self.jitter.value(), "pause_every_records": self.batch_count.value(), "pause_minutes": self.batch_pause.value(), "page_timeout_seconds": 30, "network_retries": 2, "network_retry_seconds": 15},
+            "timing": {"between_records_seconds": self.interval.value(), "random_jitter_seconds": self.jitter.value(), "pause_every_records": self.batch_count.value(), "pause_minutes": self.batch_pause.value(), "page_timeout_seconds": 60, "uiautomator2_server_read_timeout_seconds": 60, "appium_command_timeout_seconds": 75, "network_retries": 2, "network_retry_seconds": 15},
         }
         self.thread = QThread(self); self.worker = BatchWorker(self.records, config, self.results_path)
         self.worker.moveToThread(self.thread); self.thread.started.connect(self.worker.run)

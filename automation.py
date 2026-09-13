@@ -189,12 +189,20 @@ class MarketingAutomation:
         # blocking the UiAutomator2 server while retaining the labels and
         # clickable containers used by this workflow.
         options.set_capability("appium:settings[ignoreUnimportantViews]", True)
-        options.set_capability("appium:uiautomator2ServerReadTimeout", 15000)
+        # H5 entry/detail pages can take tens of seconds to render after the
+        # coordinate navigation chain. Keep the HTTP client timeout longer
+        # than UiAutomator2's page-read timeout so a slow but valid page is not
+        # interrupted at the default 15-second boundary.
+        read_timeout = max(15, int(self.config.get("timing", {}).get(
+            "uiautomator2_server_read_timeout_seconds", 60)))
+        command_timeout = max(read_timeout + 15, int(self.config.get("timing", {}).get(
+            "appium_command_timeout_seconds", 75)))
+        options.set_capability("appium:uiautomator2ServerReadTimeout", read_timeout * 1000)
         appium_url = self.config.get("appium_url", "http://127.0.0.1:4723/wd/hub")
         # A WebView activity transition can leave one Appium command waiting
-        # forever on some Xiaomi builds.  Bound the HTTP call so the worker can
-        # report a failure and stop instead of appearing frozen.
-        client_config = ClientConfig(remote_server_addr=appium_url, timeout=30,
+        # forever on some Xiaomi builds. Bound the HTTP call while allowing
+        # the slow marketing H5 page to finish loading.
+        client_config = ClientConfig(remote_server_addr=appium_url, timeout=command_timeout,
                                      init_args_for_pool_manager={"init_args_for_pool_manager": {"retries": 0}})
         # A previous run can leave the instrumentation and tcp:8200 forward
         # alive even after the desktop window is closed.  Starting a new
@@ -221,7 +229,7 @@ class MarketingAutomation:
         # Do not send an extra timeout command immediately after session
         # creation.  On Honor/MagicOS that command can race UiAutomation's
         # first accessibility request and make the next page read hang.
-        self.driver.command_executor._client_config.timeout = 20
+        self.driver.command_executor._client_config.timeout = command_timeout
         self._context = "NATIVE_APP"
 
     def close(self) -> None:
