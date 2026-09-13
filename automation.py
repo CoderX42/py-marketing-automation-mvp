@@ -541,7 +541,7 @@ class MarketingAutomation:
             # Verified on the Honor layout (1020x2250 override). Keep these
             # as proportional rectangles so other portrait resolutions work.
             return {
-                "adb": True,
+                "adb": True, "coordinate_fallback": True,
                 "input_bounds": (int(width * .378), int(height * .146),
                                   int(width * .91), int(height * .171)),
                 "clear_bounds": (int(width * .392), int(height * .201),
@@ -656,7 +656,7 @@ class MarketingAutomation:
                     input_x, input_y = int(width * .645), int(height * .158)
                     jump_x, jump_y = int(width * .774), int(height * .219)
                     self.log("未读取到 WebView 控件，改用荣耀设备固定布局坐标继续")
-                    return {"adb": True,
+                    return {"adb": True, "coordinate_fallback": True,
                             "input_bounds": (input_x - 2, input_y - 2, input_x + 2, input_y + 2),
                             "jump_bounds": (jump_x - 2, jump_y - 2, jump_x + 2, jump_y + 2)}
             except Exception:
@@ -1014,7 +1014,16 @@ class MarketingAutomation:
         # ``_query_once`` used to trigger a second 35-second Appium source
         # timeout on Honor even though the first ADB lookup had succeeded.
         self._entry_field = self._wait_phone_input(timeout=max(30, input_timeout))
-        self._verify_free_entry_title()
+        try:
+            self._verify_free_entry_title()
+        except NavigationError:
+            # Coordinate fallback is only offered after the full four-step
+            # navigation chain has completed. If the accessibility title is
+            # temporarily unavailable as well, keep the verified field and
+            # proceed rather than stopping before input.
+            if not (isinstance(self._entry_field, dict) and self._entry_field.get("coordinate_fallback")):
+                raise
+            self.log("输入页标题暂时不可读，已按荣耀固定布局继续")
         self.log("已确认免签入手机号输入页")
 
     def _verify_free_entry_title(self) -> None:
