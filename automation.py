@@ -1249,11 +1249,13 @@ class MarketingAutomation:
         try:
             dumped = subprocess.run([adb, "shell", "uiautomator", "dump", remote], check=False, capture_output=True, text=True,
                                     encoding="utf-8", errors="replace", timeout=5, **subprocess_options())
-            if dumped.returncode != 0:
-                return None
             loaded = subprocess.run([adb, "exec-out", "cat", remote], check=False, capture_output=True, text=True,
                                     encoding="utf-8", timeout=3, **subprocess_options())
-            if loaded.returncode != 0:
+            # Some Android 15/Honor builds terminate the dump helper with
+            # status 137 after writing a complete XML file. Parse the file
+            # whenever it is present; relying solely on the exit status loses
+            # the input controls we need during a busy WebView transition.
+            if not loaded.stdout.strip():
                 return None
             return ET.fromstring(loaded.stdout)
         except Exception:
