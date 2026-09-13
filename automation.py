@@ -96,6 +96,15 @@ class MarketingAutomation:
             )
         except (AdbError, OSError):
             return False
+
+    def _appium_settings_is_installed(self, serial: str) -> bool:
+        """Return whether the UiAutomator2 Settings helper is provisioned."""
+        try:
+            return bool(AdbController().run(
+                "-s", serial, "shell", "pm", "path", "io.appium.settings", timeout=15
+            ))
+        except (AdbError, OSError):
+            return False
         self.on_detail_progress = None
 
     def connect(self) -> None:
@@ -113,6 +122,16 @@ class MarketingAutomation:
                 self.log("已检测到 UiAutomator2 辅助服务，跳过重复安装")
             else:
                 self.log("手机尚未完整安装 UiAutomator2 辅助服务，首次启动请确认手机上的两个安装弹窗")
+            # The first full initialization installs io.appium.settings.  Once
+            # it exists, skip initialization on later runs so Honor/MagicOS
+            # does not show the PC-tool installation warning every time.
+            if self._appium_settings_is_installed(serial):
+                self.config.setdefault("skip_device_initialization", True)
+                options.set_capability("appium:skipSettingsAppReinstall", True)
+                self.log("已检测到 Appium Settings 辅助包，跳过重复安装")
+            else:
+                self.config.setdefault("skip_device_initialization", False)
+                self.log("手机尚未安装 Appium Settings 辅助包，首次启动请确认安装提示")
         options.no_reset = True
         # Attach to the page the user already opened. Launching SplashActivity
         # for every desktop run can route an otherwise valid session to login.
@@ -136,9 +155,14 @@ class MarketingAutomation:
         # 部分小米/国产 ROM 拒绝 settings delete global hidden_api_policy。
         # 该选项让 UiAutomator2 忽略这一步，不影响普通自动化能力。
         options.set_capability("appium:ignoreHiddenApiPolicyError", True)
-        # 部分 ROM 不允许 adb install -g 给 Appium Settings 辅助包自动授予权限。
-        # 跳过设备初始化即可继续安装并启动 UiAutomator2 服务。
-        options.set_capability("appium:skipDeviceInitialization", True)
+        # Settings helper is required by UiAutomator2 on devices where the
+        # driver performs device setup.  The previous hard-coded `true` left
+        # fresh Honor devices without io.appium.settings and could make the
+        # UiAutomator2 instrumentation hang before the first click.  Keep the
+        # safe full-initialization default; an operator can opt out explicitly
+        # for a pre-provisioned device through config when needed.
+        skip_device_initialization = bool(self.config.get("skip_device_initialization", False))
+        options.set_capability("appium:skipDeviceInitialization", skip_device_initialization)
         options.set_capability("appium:settings[waitForIdleTimeout]", 0)
         options.set_capability("appium:settings[waitForSelectorTimeout]", 0)
         options.set_capability("appium:uiautomator2ServerReadTimeout", 15000)
@@ -873,7 +897,26 @@ class MarketingAutomation:
             # terminate/conflict with Appium's UiAutomator2 instrumentation.
             # Use the existing session for hierarchies and ADB only for taps.
             self._switch_native()
-            return ET.fromstring(self.driver.page_source)
+            try:
+                return ET.fromstring(self.driver.page_source)
+            except Exception as exc:
+                error_text = str(exc)
+                # A terminated/invalid Appium session cannot be repaired by
+                # starting another hierarchy client; preserve the original
+                # error so the caller can recreate the session cleanly.
+                if any(marker in error_text.lower() for marker in ("session lost", "invalid session", "no such session")):
+                    raise
+                # Honor/MagicOS can briefly stall the UiAutomator2 proxy while
+                # the app's H5 home page is loading.  A failed page_source
+                # must not prevent the real ADB tap from reaching the phone;
+                # use a bounded ADB hierarchy dump as a recovery path.  Once
+                # navigation settles, subsequent snapshots return to Appium.
+                getattr(self, "log", lambda _: None)(f"Appium 页面读取超时，改用 ADB 读取当前控件：{error_text.split('Stacktrace:')[0]}")
+                return self._adb_ui_root_from_adb()
+        return self._adb_ui_root_from_adb()
+
+    def _adb_ui_root_from_adb(self):
+        """Read the native hierarchy through ADB with short bounded calls."""
         adb = self._adb_path()
         if not adb:
             return None
