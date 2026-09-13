@@ -497,6 +497,9 @@ class MarketingAutomation:
         if root is None:
             return None
         labels = self._root_text(root)
+        # A real red network banner must still interrupt this fallback; only
+        # an unreadable hierarchy is allowed to continue via coordinates.
+        self._check_session_message(labels, check_login=False)
         entry = self._normal_text(self._text("marketing_entry"))
         has_entry_title = any(self._normal_text(label) in {entry, self._normal_text("营销详情免签入")}
                               for label in labels)
@@ -594,7 +597,7 @@ class MarketingAutomation:
                 # return 137 even though the H5 controls are visible. After
                 # the normal loading grace period, use the verified Honor
                 # coordinates so the chain can continue without XML access.
-                if time.monotonic() - adb_started >= 20:
+                if time.monotonic() - adb_started >= 45:
                     field = self._adb_phone_input_coordinate_fallback()
                     if field:
                         getattr(self, "log", lambda _msg: None)("已通过 ADB 坐标定位手机号输入框和跳转按钮")
@@ -647,8 +650,11 @@ class MarketingAutomation:
                 # rendered input controls are invisible to accessibility.
                 if "com.sh.cm.grid4a" in focused:
                     width, height = self._screen_size()
-                    input_x, input_y = int(width * .73), int(height * .145)
-                    jump_x, jump_y = int(width * .705), int(height * .20)
+                    # Tap the centres of the verified input and jump regions,
+                    # rather than their top edges (which can miss the H5
+                    # button on devices with a slightly different inset).
+                    input_x, input_y = int(width * .645), int(height * .158)
+                    jump_x, jump_y = int(width * .774), int(height * .219)
                     self.log("未读取到 WebView 控件，改用荣耀设备固定布局坐标继续")
                     return {"adb": True,
                             "input_bounds": (input_x - 2, input_y - 2, input_x + 2, input_y + 2),
