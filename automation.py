@@ -715,6 +715,35 @@ class MarketingAutomation:
         """Tap the fixed free-entry tile when the full-view H5 tree is absent."""
         if not getattr(self, "_prefer_adb_home_tab", False):
             return False
+
+    def _tap_smart_marketing_chain_by_adb(self) -> bool:
+        """Use fixed navigation targets while the app homepage tree is blocked."""
+        if not getattr(self, "_prefer_adb_home_tab", False):
+            return False
+        serial = getattr(self, "_device_serial", None)
+        if not serial:
+            return False
+        try:
+            adb = AdbController()
+            sizes = re.findall(r"(\d+)x(\d+)", adb.run("-s", serial, "shell", "wm", "size", timeout=10))
+            if not sizes:
+                return False
+            width, height = map(int, sizes[-1])
+            if width >= height:
+                return False
+            targets = (
+                (width * .245, height * .12, "个人业务"),
+                (width * .10, height * .18, "全景视图"),
+                (width * .79, height * .32, "营销助手(免签入)"),
+            )
+            for x, y, label in targets:
+                adb.run("-s", serial, "shell", "input", "tap", str(round(x)), str(round(y)), timeout=10)
+                self.log(f'已通过 ADB 点击“{label}”，等待页面加载')
+                time.sleep(1)
+            self._source_unavailable_until = 0.0
+            return True
+        except (AdbError, OSError):
+            return False
         serial = getattr(self, "_device_serial", None)
         if not serial:
             return False
@@ -733,7 +762,10 @@ class MarketingAutomation:
 
     def _tap_home_marketing_flow(self) -> None:
         self.log('正在进入“智慧营销”')
-        if not self._tap_main_marketing_tab():
+        main_tab_tapped = self._tap_main_marketing_tab()
+        if main_tab_tapped and self._tap_smart_marketing_chain_by_adb():
+            return
+        if not main_tab_tapped:
             self._dismiss_network_popup()
             if not self._adb_tap_target(resource_id="com.sh.cm.grid4a:id/menu_nav_item_2"):
                 raise NavigationError("未找到底部智慧营销页签，请将手机停留在应用首页")
