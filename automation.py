@@ -601,6 +601,7 @@ class MarketingAutomation:
             self._text("jump_button"), self._text("detail_marker"),
             "暂无数据", "常用",
         ]
+        found = []
         for label in dict.fromkeys(value for value in labels if value):
             try:
                 nodes = self.driver.find_elements(
@@ -609,10 +610,13 @@ class MarketingAutomation:
             except Exception:
                 continue
             if nodes:
-                return ET.fromstring(
-                    f'<hierarchy><node text="{html.escape(label, quote=True)}" /></hierarchy>'
-                )
-        return None
+                found.append(label)
+        if not found:
+            return None
+        root = ET.Element("hierarchy")
+        for label in found:
+            ET.SubElement(root, "node", {"text": label})
+        return root
 
     def _direct_elements_root(self):
         """Read element attributes without asking UiAutomator2 for XML.
@@ -1025,8 +1029,13 @@ class MarketingAutomation:
             # terminate/conflict with Appium's UiAutomator2 instrumentation.
             # Use the existing session for hierarchies and ADB only for taps.
             self._switch_native()
+            unavailable_until = float(getattr(self, "_source_unavailable_until", 0.0))
+            if time.monotonic() < unavailable_until:
+                raise RuntimeError("Appium 页面读取暂时不可用")
             try:
-                return ET.fromstring(self.driver.page_source)
+                source = ET.fromstring(self.driver.page_source)
+                self._source_unavailable_until = 0.0
+                return source
             except Exception as exc:
                 error_text = str(exc)
                 # A terminated/invalid Appium session cannot be repaired by
@@ -1040,6 +1049,7 @@ class MarketingAutomation:
                 # that command competes with UiAutomator2 and leaves the
                 # instrumentation permanently hung.  Let the caller retry or
                 # recreate the session instead.
+                self._source_unavailable_until = time.monotonic() + 3.0
                 getattr(self, "log", lambda _: None)(f"Appium 页面读取失败，将由上层重试：{error_text.split('Stacktrace:')[0]}")
                 raise
         return self._adb_ui_root_from_adb()
@@ -1085,6 +1095,12 @@ class MarketingAutomation:
                 if resource_id:
                     selectors.append((AppiumBy.ID, resource_id))
                 if text:
+                    # Prefer the nearest clickable ancestor: the visible label
+                    # is frequently a non-clickable child of the card.
+                    selectors.append((
+                        AppiumBy.XPATH,
+                        f'//*[contains(@text,"{text}")]/ancestor-or-self::*[@clickable="true"][1]',
+                    ))
                     selectors.append((AppiumBy.XPATH, f'//*[contains(@text,"{text}")]'))
                 for by, value in selectors:
                     elements = self.driver.find_elements(by, value)
