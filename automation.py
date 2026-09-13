@@ -1532,11 +1532,10 @@ class MarketingAutomation:
                 self.log("已尝试关闭网络异常提示，准备重试当前号码")
             return dismissed
         except Exception:
-            logger = getattr(self, "log", None)
-            if callable(logger):
-                # A hierarchy timeout means the page is not readable yet; it
-                # does not establish that a network banner is present.
-                logger("页面暂未可读取，跳过网络提示关闭")
+            # A hierarchy timeout means the page is not readable yet; it does
+            # not establish that a network banner is present. _adb_ui_root()
+            # already records its transport diagnostic, so avoid adding a
+            # repeated network-looking line to the user-facing run log.
             return False
 
     def query(self, phone: str) -> dict:
