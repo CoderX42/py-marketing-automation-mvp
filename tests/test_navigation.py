@@ -203,7 +203,7 @@ class AdbTargetNavigationTests(unittest.TestCase):
             self.navigator._ensure_entry()
         self.assertEqual(page_index, 4)
         self.assertEqual(self.navigator._adb_tap_xy.call_args_list, [call(*xy) for xy in expected_taps])
-        self.navigator._wait_phone_input.assert_called_once_with(timeout=30)
+        self.navigator._wait_phone_input.assert_called_once_with(timeout=90)
         self.navigator._find_text.assert_not_called()
 
     def test_no_data_uses_home_common_free_assistant_and_verifies_input_title(self):
@@ -236,7 +236,7 @@ class AdbTargetNavigationTests(unittest.TestCase):
         self.navigator._ensure_entry()
         self.assertEqual(page_index, 3)
         self.assertEqual(self.navigator._adb_tap_xy.call_args_list, [call(*xy) for xy in expected_taps])
-        self.navigator._wait_phone_input.assert_called_once_with(timeout=30)
+        self.navigator._wait_phone_input.assert_called_once_with(timeout=90)
 
     def test_marketing_page_timeout_falls_back_to_common_entry(self):
         self.navigator._wait_ui = Mock(return_value=None)
@@ -276,7 +276,7 @@ class AdbTargetNavigationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(automation.NavigationError, "标题不是.*免签入"):
             self.navigator._ensure_entry()
-        self.navigator._wait_phone_input.assert_called_once_with(timeout=30)
+        self.navigator._wait_phone_input.assert_called_once_with(timeout=90)
         self.navigator._adb_tap_xy.assert_not_called()
 
     def test_default_query_skips_login_precheck_and_enters_navigation(self):

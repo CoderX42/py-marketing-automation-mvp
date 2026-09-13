@@ -21,6 +21,7 @@
     "pause_every_records": 50,
     "pause_minutes": 2,
     "page_timeout_seconds": 60,
+    "input_page_timeout_seconds": 90,
     "uiautomator2_server_read_timeout_seconds": 60,
     "appium_command_timeout_seconds": 35,
     "detail_max_scrolls": 80,

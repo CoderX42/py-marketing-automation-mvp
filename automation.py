@@ -498,11 +498,15 @@ class MarketingAutomation:
             return None
         labels = self._root_text(root)
         entry = self._normal_text(self._text("marketing_entry"))
-        if not any(self._normal_text(label) in {entry, self._normal_text("营销详情免签入")}
-                   for label in labels):
+        has_entry_title = any(self._normal_text(label) in {entry, self._normal_text("营销详情免签入")}
+                              for label in labels)
+        has_phone_label = any(self._normal_text(label) == self._normal_text(self._text("phone_input_hint"))
+                              for label in labels)
+        if not has_entry_title and not has_phone_label:
             return None
         input_bounds = None
         jump_bounds = None
+        clear_bounds = None
         for node in root.iter():
             bounds = self._node_bounds(node)
             if not bounds or node.get("enabled") == "false":
@@ -511,8 +515,11 @@ class MarketingAutomation:
                 input_bounds = bounds
             if self._normal_text(self._node_label(node)) == self._normal_text(self._text("jump_button")):
                 jump_bounds = bounds
+            if self._normal_text(self._node_label(node)) == self._normal_text("清空"):
+                clear_bounds = bounds
         if input_bounds and jump_bounds:
-            return {"adb": True, "input_bounds": input_bounds, "jump_bounds": jump_bounds}
+            return {"adb": True, "input_bounds": input_bounds, "jump_bounds": jump_bounds,
+                    "clear_bounds": clear_bounds}
         return None
 
     def _adb_tap_bounds(self, bounds) -> bool:
@@ -521,6 +528,9 @@ class MarketingAutomation:
 
     def _adb_enter_phone(self, field, phone: str) -> None:
         """Type a phone and press jump using ADB when Appium WebView is stalled."""
+        if field.get("clear_bounds"):
+            self._adb_tap_bounds(field["clear_bounds"])
+            time.sleep(.2)
         if not self._adb_tap_bounds(field["input_bounds"]):
             raise NavigationError("无法点击手机号输入框")
         adb = self._adb_path()
@@ -538,6 +548,7 @@ class MarketingAutomation:
     def _wait_phone_input(self, timeout: int = 10):
         end = time.time() + timeout
         last_error = None
+        next_wait_log = time.monotonic() + 10
         # The native XML dump remains responsive on Honor while Appium's
         # page_source request can block for its full HTTP timeout. Locate the
         # two controls through ADB first so a ready page proceeds immediately.
@@ -573,6 +584,10 @@ class MarketingAutomation:
                 except (NetworkUnavailableError, ManualLoginRequired):
                     raise
                 time.sleep(0.4)
+            if time.monotonic() >= next_wait_log:
+                elapsed = max(0, int(timeout - max(0, end - time.time())))
+                getattr(self, "log", lambda _msg: None)(f"手机号输入页仍在加载，已等待约 {elapsed} 秒…")
+                next_wait_log = time.monotonic() + 10
         # A page-read/element lookup timeout is not proof of a network outage.
         # Only _check_session_message() may raise NetworkUnavailableError when
         # an explicit network marker is visible. Keep this as a navigation
@@ -869,7 +884,8 @@ class MarketingAutomation:
         self._switch_native()
         self._back_to_entry_surface()
         self._tap_home_marketing_flow()
-        self._wait_phone_input(timeout=30)
+        input_timeout = int(self.config.get("timing", {}).get("input_page_timeout_seconds", 90))
+        self._wait_phone_input(timeout=max(30, input_timeout))
         self._verify_free_entry_title()
         self.log("已确认免签入手机号输入页")
 
@@ -951,8 +967,17 @@ class MarketingAutomation:
         root = (self._adb_ui_root_from_adb()
                 if getattr(self, "_prefer_adb_home_tab", False) and getattr(self, "_device_serial", None)
                 else self._adb_ui_root())
-        size = self.driver.get_window_size()
-        width, height = int(size["width"]), int(size["height"])
+        # Honor/MagicOS WebView sessions can stop proxying Appium commands
+        # immediately after the jump action.  When ADB navigation is enabled,
+        # keep scrolling entirely through ADB and obtain the screen dimensions
+        # from the device instead of calling ``driver.get_window_size()``.
+        # The latter is an Appium command and was the source of a false
+        # partial-result failure even though the detail page was visible.
+        if getattr(self, "_prefer_adb_home_tab", False) and getattr(self, "_device_serial", None):
+            width, height = self._screen_size()
+        else:
+            size = self.driver.get_window_size()
+            width, height = int(size["width"]), int(size["height"])
         bounds = [self._node_bounds(n) for n in root.iter()
                   if n.get("class") == "android.webkit.WebView"]
         bounds = [b for b in bounds if b]
@@ -1433,6 +1458,22 @@ class MarketingAutomation:
                 return width, height
         except Exception:
             pass
+        # If the Appium proxy is stalled, query the device directly.  This
+        # keeps ADB-only detail collection aligned with the phone's actual
+        # resolution (including a wm size override on Honor devices).
+        adb = self._adb_path()
+        if adb:
+            try:
+                result = subprocess.run(
+                    [adb, "shell", "wm", "size"], check=False,
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=5, **subprocess_options(),
+                )
+                sizes = re.findall(r"(\d+)x(\d+)", result.stdout or "")
+                if sizes:
+                    return tuple(map(int, sizes[-1]))
+            except Exception:
+                pass
         return 1080, 2400
 
     def _network_banner_bounds(self, root, marker_nodes) -> tuple[int, int, int, int] | None:
@@ -1682,7 +1723,8 @@ class MarketingAutomation:
         if self.config.get("check_login_state", False):
             self._require_manual_login_if_needed()
         self._ensure_entry()
-        field = self._wait_phone_input(timeout=10)
+        input_timeout = int(self.config.get("timing", {}).get("input_page_timeout_seconds", 90))
+        field = self._wait_phone_input(timeout=max(30, input_timeout))
         if isinstance(field, dict) and field.get("adb"):
             self._adb_enter_phone(field, phone)
             self.log(f"已通过 ADB 输入号码后四位 {phone[-4:]} 并点击跳转")
