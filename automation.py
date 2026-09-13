@@ -139,7 +139,11 @@ class MarketingAutomation:
             # it exists, skip initialization on later runs so Honor/MagicOS
             # does not show the PC-tool installation warning every time.
             if self._appium_settings_is_installed(serial):
-                self.config.setdefault("skip_device_initialization", True)
+                # Keep device initialization enabled so UiAutomator2 can
+                # establish its accessibility connection cleanly.  Skipping
+                # only the helper reinstall avoids the Android warning and
+                # does not require aapt2 on every subsequent session.
+                self.config.setdefault("skip_device_initialization", False)
                 options.set_capability("appium:skipSettingsAppReinstall", True)
                 self.log("已检测到 Appium Settings 辅助包，跳过重复安装")
             else:
@@ -185,6 +189,12 @@ class MarketingAutomation:
         # report a failure and stop instead of appearing frozen.
         client_config = ClientConfig(remote_server_addr=appium_url, timeout=30,
                                      init_args_for_pool_manager={"init_args_for_pool_manager": {"retries": 0}})
+        # A previous run can leave the instrumentation and tcp:8200 forward
+        # alive even after the desktop window is closed.  Starting a new
+        # session on top of that stale server is the common cause of a
+        # successful connection followed by the first page_source timeout.
+        if serial:
+            self._reset_uiautomator_state(serial)
         try:
             self.driver = webdriver.Remote(appium_url, options=options, client_config=client_config)
         except Exception as exc:
@@ -527,7 +537,24 @@ class MarketingAutomation:
     def _wait_ui(self, predicate, timeout: float = 15):
         deadline = time.monotonic() + timeout
         while True:
-            root = self._adb_ui_root()
+            try:
+                root = self._adb_ui_root()
+            except Exception as exc:
+                # Some Honor/MagicOS builds answer element queries but hang on
+                # the full accessibility XML (GET /source).  Keep navigation
+                # moving by asking UiAutomator2 for the small set of labels
+                # used by this workflow instead of polling a dead hierarchy.
+                root = self._direct_label_root()
+                if root is not None:
+                    try:
+                        if predicate(root):
+                            return root
+                    except Exception:
+                        pass
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(0.35)
+                continue
             if root is not None:
                 try:
                     # Check overlays before accepting the underlying page.
@@ -557,6 +584,64 @@ class MarketingAutomation:
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.5)
+
+    def _direct_label_root(self):
+        """Build a tiny hierarchy from direct UiAutomator label queries.
+
+        ``page_source`` can block while a WebView is settling on Honor ROMs,
+        although find-elements by text still responds.  This fallback lets
+        the state machine wait for a marker without requiring a full dump.
+        It is intentionally limited to known workflow labels and never taps.
+        """
+        if not self.driver:
+            return None
+        labels = [
+            self._text("home_marker"), self._text("full_view_marker"),
+            self._text("marketing_entry"), self._text("phone_input_hint"),
+            self._text("jump_button"), self._text("detail_marker"),
+            "暂无数据", "常用",
+        ]
+        for label in dict.fromkeys(value for value in labels if value):
+            try:
+                nodes = self.driver.find_elements(
+                    AppiumBy.XPATH, f'//*[contains(@text,"{label}")]'
+                )
+            except Exception:
+                continue
+            if nodes:
+                return ET.fromstring(
+                    f'<hierarchy><node text="{html.escape(label, quote=True)}" /></hierarchy>'
+                )
+        return None
+
+    def _direct_elements_root(self):
+        """Read element attributes without asking UiAutomator2 for XML.
+
+        This is a slower fallback used only when ``page_source`` is stuck. A
+        wildcard element query still lets us preserve the visible marketing
+        text and bounds needed by the scrolling collector.
+        """
+        if not self.driver:
+            return None
+        try:
+            elements = self.driver.find_elements(AppiumBy.XPATH, "//*")
+        except Exception:
+            return None
+        root = ET.Element("hierarchy")
+        try:
+            for element in elements:
+                attrs = {}
+                for name in ("text", "content-desc", "class", "resource-id", "bounds"):
+                    try:
+                        value = element.get_attribute(name)
+                    except Exception:
+                        value = ""
+                    if value:
+                        attrs[name] = str(value)
+                ET.SubElement(root, "node", attrs)
+        except Exception:
+            return None
+        return root if len(root) else None
 
     def _has_label(self, root, label: str) -> bool:
         return any(self._normal_text(t) == self._normal_text(label) for t in self._root_text(root))
@@ -620,7 +705,13 @@ class MarketingAutomation:
 
     def _verify_free_entry_title(self) -> None:
         self._dismiss_network_popup()
-        root = self._adb_ui_root()
+        try:
+            root = self._adb_ui_root()
+        except Exception:
+            # The Honor WebView can reject full XML reads while text selectors
+            # continue to respond.  Use the direct marker fallback here so a
+            # valid input page is not rejected after we already reached it.
+            root = self._direct_label_root()
         if root is None or not self._has_label(root, self._text("marketing_entry")):
             raise NavigationError("当前输入页标题不是“营销助手(免签入)”，已停止输入")
 
@@ -644,7 +735,14 @@ class MarketingAutomation:
 
     def _raise_if_network_error(self) -> None:
         self._switch_native()
-        adb_text, _ = self._adb_ui_snapshot()
+        try:
+            adb_text, _ = self._adb_ui_snapshot()
+        except Exception as exc:
+            # A full hierarchy read can time out on Honor WebView pages even
+            # while direct selector commands remain usable.  Do not misclassify
+            # that transport timeout as an application network outage.
+            self.log(f"网络提示检查暂时无法读取页面，继续当前操作：{str(exc).split('Stacktrace:')[0]}")
+            return
         self._check_session_message(adb_text, check_login=False)
 
     def _visible_text(self) -> list[str]:
@@ -731,7 +829,10 @@ class MarketingAutomation:
         return re.sub(r"[\ue000-\uf8ff]", "", text).strip()
 
     def _detail_snapshot(self):
-        root = self._adb_ui_root()
+        try:
+            root = self._adb_ui_root()
+        except Exception:
+            root = self._direct_elements_root()
         if root is None:
             raise NavigationError("无法读取营销详情页面")
         all_text = self._root_text(root)
@@ -853,7 +954,10 @@ class MarketingAutomation:
         deadline = time.monotonic() + timeout
         last_text = []
         while time.monotonic() < deadline:
-            root = self._adb_ui_root()
+            try:
+                root = self._adb_ui_root()
+            except Exception:
+                root = self._direct_label_root()
             if root is None:
                 time.sleep(.5)
                 continue
@@ -968,7 +1072,34 @@ class MarketingAutomation:
     def _adb_tap_target(self, *, text: str | None = None, resource_id: str | None = None) -> bool:
         if not text and not resource_id:
             return False
-        root = self._adb_ui_root()
+        try:
+            root = self._adb_ui_root()
+        except Exception as exc:
+            # Honor/MagicOS may hang on GET /source while direct selector
+            # queries still work.  Fall back to a real UiAutomator2 element
+            # click instead of abandoning the navigation chain.
+            if self.driver is None:
+                raise
+            try:
+                selectors = []
+                if resource_id:
+                    selectors.append((AppiumBy.ID, resource_id))
+                if text:
+                    selectors.append((AppiumBy.XPATH, f'//*[contains(@text,"{text}")]'))
+                for by, value in selectors:
+                    elements = self.driver.find_elements(by, value)
+                    if not elements:
+                        continue
+                    element = elements[0]
+                    try:
+                        element.click()
+                    except Exception:
+                        self.driver.execute_script("mobile: clickGesture", {"elementId": element.id})
+                    self.log(f"已通过控件定位点击 {text or resource_id}")
+                    return True
+            except Exception as direct_exc:
+                self.log(f"控件定位点击失败，保留原始层级错误：{str(direct_exc).split('Stacktrace:')[0]}")
+            raise exc
         if root is None:
             return False
         # Re-read after clearing an overlay.  A network banner shares the
