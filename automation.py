@@ -195,8 +195,12 @@ class MarketingAutomation:
         # interrupted at the default 15-second boundary.
         read_timeout = max(15, int(self.config.get("timing", {}).get(
             "uiautomator2_server_read_timeout_seconds", 60)))
-        command_timeout = max(read_timeout + 15, int(self.config.get("timing", {}).get(
-            "appium_command_timeout_seconds", 75)))
+        # Keep individual Appium HTTP calls bounded so a stalled accessibility
+        # dump does not block the worker for the entire page-read grace period.
+        # Direct element queries remain available as the fallback while the
+        # WebView finishes loading.
+        command_timeout = max(30, int(self.config.get("timing", {}).get(
+            "appium_command_timeout_seconds", 35)))
         options.set_capability("appium:uiautomator2ServerReadTimeout", read_timeout * 1000)
         appium_url = self.config.get("appium_url", "http://127.0.0.1:4723/wd/hub")
         # A WebView activity transition can leave one Appium command waiting
@@ -490,24 +494,26 @@ class MarketingAutomation:
     def _wait_phone_input(self, timeout: int = 10):
         end = time.time() + timeout
         last_error = None
-        # A network failure can leave a red banner above the otherwise valid
-        # input page.  Remove that transient obstruction before looking up the
-        # field; if it cannot be removed, let NetworkUnavailableError reach
-        # the retry wrapper instead of turning it into a misleading timeout.
-        self._dismiss_network_popup()
-        self._raise_if_network_error()
+        # Try direct element selectors first. On Honor devices the full
+        # accessibility source can block while this H5 page is loading even
+        # though the phone input and jump controls are already usable.
+        getattr(self, "log", lambda _msg: None)("正在等待营销助手手机号输入框加载…")
         while time.time() < end:
             try:
-                # The banner can arrive a few seconds after input-page
-                # navigation starts. Re-check on every poll so an explicit
-                # marker is still classified as a network interruption while
-                # an ordinary page-read timeout remains a navigation failure.
-                self._raise_if_network_error()
-                return self._phone_input()
+                field = self._phone_input()
+                getattr(self, "log", lambda _msg: None)("已找到营销助手手机号输入框")
+                return field
             except (NetworkUnavailableError, ManualLoginRequired):
                 raise
             except Exception as exc:
                 last_error = exc
+                # A network marker, when readable, still takes precedence over
+                # a normal loading timeout. This check is deliberately after
+                # the direct lookup so it cannot delay a valid input field.
+                try:
+                    self._raise_if_network_error()
+                except (NetworkUnavailableError, ManualLoginRequired):
+                    raise
                 time.sleep(0.4)
         # A page-read/element lookup timeout is not proof of a network outage.
         # Only _check_session_message() may raise NetworkUnavailableError when

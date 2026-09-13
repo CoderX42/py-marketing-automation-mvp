@@ -22,7 +22,7 @@
     "pause_minutes": 2,
     "page_timeout_seconds": 60,
     "uiautomator2_server_read_timeout_seconds": 60,
-    "appium_command_timeout_seconds": 75,
+    "appium_command_timeout_seconds": 35,
     "detail_max_scrolls": 80,
     "network_retries": 2,
     "network_retry_seconds": 15,

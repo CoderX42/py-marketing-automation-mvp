@@ -680,7 +680,7 @@ class NetworkRetryQueryTests(unittest.TestCase):
             with self.assertRaises(automation.NetworkUnavailableError):
                 navigator._wait_phone_input(timeout=10)
 
-        self.assertEqual(navigator._phone_input.call_count, 1)
+        self.assertEqual(navigator._phone_input.call_count, 3)
 
     def test_input_timeout_without_network_marker_is_navigation_failure(self):
         """A page-read timeout alone must not be classified as network loss."""
