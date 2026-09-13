@@ -682,8 +682,8 @@ class NetworkRetryQueryTests(unittest.TestCase):
 
         self.assertEqual(navigator._phone_input.call_count, 1)
 
-    def test_input_timeout_is_retryable_when_overlay_is_not_exposed_to_accessibility(self):
-        """A late network transition may hide the banner from the UI tree."""
+    def test_input_timeout_without_network_marker_is_navigation_failure(self):
+        """A page-read timeout alone must not be classified as network loss."""
         navigator = object.__new__(automation.MarketingAutomation)
         navigator.config = {"selectors": {"network_error": "当前网络不可用"}}
         navigator.driver = Mock()
@@ -695,8 +695,9 @@ class NetworkRetryQueryTests(unittest.TestCase):
         with patch.object(automation.time, "time", side_effect=[0, 20]), patch.object(
             automation.time, "sleep"
         ):
-            with self.assertRaises(automation.NetworkUnavailableError):
+            with self.assertRaises(automation.NavigationError) as raised:
                 navigator._wait_phone_input(timeout=10)
+        self.assertNotIsInstance(raised.exception, automation.NetworkUnavailableError)
 
     def test_query_retries_same_phone_when_first_navigation_returns_home(self):
         """A home-page return must cause a fresh entry navigation for the same phone."""

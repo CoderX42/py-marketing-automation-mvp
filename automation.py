@@ -490,12 +490,10 @@ class MarketingAutomation:
         self._raise_if_network_error()
         while time.time() < end:
             try:
-                # The banner often arrives a few seconds *after* the input
-                # page navigation starts.  Checking only once before this
-                # loop turns that state into the misleading “输入页未加载”
-                # timeout seen in the desktop log.  Re-check on every poll so
-                # the retry wrapper can classify it as a network interruption
-                # and retry the same phone.
+                # The banner can arrive a few seconds after input-page
+                # navigation starts. Re-check on every poll so an explicit
+                # marker is still classified as a network interruption while
+                # an ordinary page-read timeout remains a navigation failure.
                 self._raise_if_network_error()
                 return self._phone_input()
             except (NetworkUnavailableError, ManualLoginRequired):
@@ -503,14 +501,12 @@ class MarketingAutomation:
             except Exception as exc:
                 last_error = exc
                 time.sleep(0.4)
-        # A failed network request can return the app to Home (or leave a
-        # plugin activity in front) without exposing the red banner in the
-        # accessibility tree.  The old generic timeout was then recorded as
-        # a navigation failure and stopped the batch before the same number
-        # could be retried.  Treat this pre-input timeout as a transient
-        # navigation/network interruption; ``query`` will re-enter the full
-        # workflow for this phone and retain the normal bounded retry policy.
-        raise NetworkUnavailableError("手机号输入页未加载完成，可能被网络提示遮挡，正在重试当前号码") from last_error
+        # A page-read/element lookup timeout is not proof of a network outage.
+        # Only _check_session_message() may raise NetworkUnavailableError when
+        # an explicit network marker is visible. Keep this as a navigation
+        # failure so the batch does not needlessly retry it as a network
+        # interruption.
+        raise NavigationError("手机号输入页未加载完成，页面控件暂时不可读") from last_error
 
     def _back_to_entry_surface(self) -> None:
         """Leave a previous detail/input page so the next number starts at the entry."""
@@ -839,11 +835,11 @@ class MarketingAutomation:
         self._switch_native()
         try:
             adb_text, _ = self._adb_ui_snapshot()
-        except Exception as exc:
+        except Exception:
             # A full hierarchy read can time out on Honor WebView pages even
-            # while direct selector commands remain usable.  Do not misclassify
-            # that transport timeout as an application network outage.
-            self.log(f"网络提示检查暂时无法读取页面，继续当前操作：{str(exc).split('Stacktrace:')[0]}")
+            # while direct selector commands remain usable. This is a page
+            # transport/readiness issue, not evidence of an app network outage;
+            # keep the check silent so users do not see a false network error.
             return
         self._check_session_message(adb_text, check_login=False)
 
@@ -1535,10 +1531,12 @@ class MarketingAutomation:
             else:
                 self.log("已尝试关闭网络异常提示，准备重试当前号码")
             return dismissed
-        except Exception as exc:
+        except Exception:
             logger = getattr(self, "log", None)
             if callable(logger):
-                logger(f"关闭网络异常提示失败，将直接重试：{str(exc).split('Stacktrace:')[0]}")
+                # A hierarchy timeout means the page is not readable yet; it
+                # does not establish that a network banner is present.
+                logger("页面暂未可读取，跳过网络提示关闭")
             return False
 
     def query(self, phone: str) -> dict:
