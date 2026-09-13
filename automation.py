@@ -522,6 +522,33 @@ class MarketingAutomation:
                     "clear_bounds": clear_bounds}
         return None
 
+    def _adb_phone_input_coordinate_fallback(self):
+        """Return verified Honor entry coordinates when UiAutomator is stalled."""
+        serial = getattr(self, "_device_serial", None)
+        if not serial:
+            return None
+        try:
+            sizes = re.findall(r"(\d+)x(\d+)", AdbController().run(
+                "-s", serial, "shell", "wm", "size", timeout=8))
+            if not sizes:
+                return None
+            width, height = map(int, sizes[-1])
+            if width >= height:
+                return None
+            # Verified on the Honor layout (1020x2250 override). Keep these
+            # as proportional rectangles so other portrait resolutions work.
+            return {
+                "adb": True,
+                "input_bounds": (int(width * .378), int(height * .146),
+                                  int(width * .91), int(height * .171)),
+                "clear_bounds": (int(width * .392), int(height * .201),
+                                  int(width * .623), int(height * .236)),
+                "jump_bounds": (int(width * .66), int(height * .201),
+                                 int(width * .888), int(height * .236)),
+            }
+        except (AdbError, OSError, ValueError):
+            return None
+
     def _adb_tap_bounds(self, bounds) -> bool:
         left, top, right, bottom = bounds
         return self._adb_tap_xy((left + right) // 2, (top + bottom) // 2)
@@ -554,6 +581,7 @@ class MarketingAutomation:
         # two controls through ADB first so a ready page proceeds immediately.
         if getattr(self, "_prefer_adb_home_tab", False) and getattr(self, "_device_serial", None):
             getattr(self, "log", lambda _msg: None)("正在等待营销助手手机号输入框加载…")
+            adb_started = time.monotonic()
             while time.time() < end:
                 try:
                     field = self._adb_phone_input()
@@ -562,6 +590,15 @@ class MarketingAutomation:
                         return field
                 except Exception as exc:
                     last_error = exc
+                # A running UiAutomator2 server can make `uiautomator dump`
+                # return 137 even though the H5 controls are visible. After
+                # the normal loading grace period, use the verified Honor
+                # coordinates so the chain can continue without XML access.
+                if time.monotonic() - adb_started >= 20:
+                    field = self._adb_phone_input_coordinate_fallback()
+                    if field:
+                        getattr(self, "log", lambda _msg: None)("已通过 ADB 坐标定位手机号输入框和跳转按钮")
+                        return field
                 time.sleep(.4)
         # Try direct element selectors first. On Honor devices the full
         # accessibility source can block while this H5 page is loading even
@@ -588,6 +625,36 @@ class MarketingAutomation:
                 elapsed = max(0, int(timeout - max(0, end - time.time())))
                 getattr(self, "log", lambda _msg: None)(f"手机号输入页仍在加载，已等待约 {elapsed} 秒…")
                 next_wait_log = time.monotonic() + 10
+        # A few Honor builds expose the WebView's rendered input page only as
+        # pixels: both Appium and ``uiautomator dump`` omit the HTML EditText
+        # even though it is visibly interactive.  If the foreground activity
+        # is still the app's MiniHtmlActivity, use the stable layout used by
+        # this page as a last-resort ADB target.  This lets the chain continue
+        # instead of stopping after an otherwise successful navigation.
+        if getattr(self, "_prefer_adb_home_tab", False) and getattr(self, "_device_serial", None):
+            try:
+                adb = self._adb_path()
+                focused = subprocess.run(
+                    [adb, "shell", "dumpsys", "window"], check=False,
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=5, **subprocess_options(),
+                ).stdout if adb else ""
+                # The activity name is not stable across APK revisions (and
+                # can briefly be omitted from dumpsys while the WebView is
+                # transitioning).  Requiring the target package is enough:
+                # _ensure_entry has just completed the four navigation taps,
+                # so a timed-out hierarchy read here means only that the
+                # rendered input controls are invisible to accessibility.
+                if "com.sh.cm.grid4a" in focused:
+                    width, height = self._screen_size()
+                    input_x, input_y = int(width * .73), int(height * .145)
+                    jump_x, jump_y = int(width * .705), int(height * .20)
+                    self.log("未读取到 WebView 控件，改用荣耀设备固定布局坐标继续")
+                    return {"adb": True,
+                            "input_bounds": (input_x - 2, input_y - 2, input_x + 2, input_y + 2),
+                            "jump_bounds": (jump_x - 2, jump_y - 2, jump_x + 2, jump_y + 2)}
+            except Exception:
+                pass
         # A page-read/element lookup timeout is not proof of a network outage.
         # Only _check_session_message() may raise NetworkUnavailableError when
         # an explicit network marker is visible. Keep this as a navigation
@@ -1505,6 +1572,23 @@ class MarketingAutomation:
                 if any(marker in self._node_label(node) for marker in markers)]
 
     def _screen_size(self) -> tuple[int, int]:
+        # In ADB fallback mode never spend the Appium command timeout asking
+        # for dimensions; the proxy may be unavailable while the phone is
+        # still rendering a usable WebView.  Query wm size first.
+        if getattr(self, "_prefer_adb_home_tab", False) and getattr(self, "_device_serial", None):
+            adb = self._adb_path()
+            if adb:
+                try:
+                    result = subprocess.run(
+                        [adb, "shell", "wm", "size"], check=False,
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", timeout=5, **subprocess_options(),
+                    )
+                    sizes = re.findall(r"(\d+)x(\d+)", result.stdout or "")
+                    if sizes:
+                        return tuple(map(int, sizes[-1]))
+                except Exception:
+                    pass
         try:
             size = self.driver.get_window_size() if self.driver else {}
             width = int(size.get("width", 0))
