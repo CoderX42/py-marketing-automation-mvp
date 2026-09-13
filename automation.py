@@ -67,6 +67,8 @@ class MarketingAutomation:
         self.log = log or (lambda _: None)
         self.driver = None
         self._context = "NATIVE_APP"
+        self._prefer_adb_home_tab = False
+        self._device_serial = None
 
     def _connected_serial(self) -> str | None:
         """Return the single authorized device Appium will use, when known."""
@@ -128,8 +130,10 @@ class MarketingAutomation:
         options.app_package = self.config.get("app_package", "com.sh.cm.grid4a")
         options.app_activity = self.config.get("app_activity", "com.sh.cm.grid4a.SplashActivity")
         serial = self._connected_serial()
+        self._device_serial = serial
         if serial:
             options.set_capability("appium:udid", serial)
+            self._prefer_adb_home_tab = bool(self.config.get("adb_home_tab_navigation", True))
             if self._uiautomator_server_is_installed(serial):
                 options.set_capability("appium:skipServerInstallation", True)
                 self.log("已检测到 UiAutomator2 辅助服务，跳过重复安装")
@@ -180,8 +184,11 @@ class MarketingAutomation:
         # for a pre-provisioned device through config when needed.
         skip_device_initialization = bool(self.config.get("skip_device_initialization", False))
         options.set_capability("appium:skipDeviceInitialization", skip_device_initialization)
-        options.set_capability("appium:settings[waitForIdleTimeout]", 0)
-        options.set_capability("appium:settings[waitForSelectorTimeout]", 0)
+        # Honor/MagicOS exposes a very large accessibility tree for the H5
+        # home page.  Keeping only important nodes prevents GET /source from
+        # blocking the UiAutomator2 server while retaining the labels and
+        # clickable containers used by this workflow.
+        options.set_capability("appium:settings[ignoreUnimportantViews]", True)
         options.set_capability("appium:uiautomator2ServerReadTimeout", 15000)
         appium_url = self.config.get("appium_url", "http://127.0.0.1:4723/wd/hub")
         # A WebView activity transition can leave one Appium command waiting
@@ -207,8 +214,13 @@ class MarketingAutomation:
             self._reset_uiautomator_state(serial)
             time.sleep(3)
             self.driver = webdriver.Remote(appium_url, options=options, client_config=client_config)
-        self.driver.update_settings({"waitForIdleTimeout": 0, "waitForSelectorTimeout": 0})
-        self.driver.implicitly_wait(0)
+        # The settings are supplied as session capabilities above.  Sending
+        # a second update-settings command immediately after session creation
+        # can make Honor's UiAutomation bridge stop responding to the next
+        # command, so leave the freshly-created session untouched here.
+        # Do not send an extra timeout command immediately after session
+        # creation.  On Honor/MagicOS that command can race UiAutomation's
+        # first accessibility request and make the next page read hang.
         self.driver.command_executor._client_config.timeout = 20
         self._context = "NATIVE_APP"
 
@@ -505,7 +517,6 @@ class MarketingAutomation:
         if not self.driver:
             return
         self._switch_native()
-        self._dismiss_network_popup()
         expected_package = self.config.get("app_package", "com.sh.cm.grid4a")
         for _ in range(5):
             try:
@@ -518,6 +529,7 @@ class MarketingAutomation:
             # a MiniHtml/WebActivity; all of them need a back navigation.
             if "MainActivity" in activity or "Login" in activity or "login" in activity.lower():
                 return
+            self._dismiss_network_popup()
             if not any(name in activity for name in ("MiniHtmlActivity", "VerifyStep1Activity", "WebActivity")):
                 # The app occasionally leaves a short-lived plug-in activity
                 # (for example `.plugin.gallery.ui.AlbumPreviewUI`) in front
@@ -670,14 +682,69 @@ class MarketingAutomation:
             raise NavigationError("首页常用中未找到“营销助手(免签入)”；请将该功能加入常用")
         self.log('已点击常用“营销助手(免签入)”，正在验证输入页')
 
+    def _tap_main_marketing_tab(self) -> bool:
+        """Leave the app homepage before asking its accessibility bridge for XML."""
+        if not getattr(self, "_prefer_adb_home_tab", False):
+            return False
+        if self.driver.current_package != self.config.get("app_package", "com.sh.cm.grid4a"):
+            return False
+        if "MainActivity" not in (self.driver.current_activity or ""):
+            return False
+        serial = getattr(self, "_device_serial", None)
+        if not serial:
+            return False
+        adb = AdbController()
+        try:
+            sizes = re.findall(r"(\d+)x(\d+)", adb.run("-s", serial, "shell", "wm", "size", timeout=10))
+            if not sizes:
+                return False
+            width, height = map(int, sizes[-1])
+            if width >= height:
+                return False
+            # The target app has five fixed bottom slots; the second is
+            # 智慧营销. This path is restricted to its verified MainActivity.
+            adb.run("-s", serial, "shell", "input", "tap", str(round(width * .30)), str(round(height * .96)), timeout=10)
+            self._source_unavailable_until = 0.0
+            self.log('已通过 ADB 点击底部“智慧营销”，等待页面加载')
+            time.sleep(1)
+            return True
+        except (AdbError, OSError):
+            return False
+
+    def _tap_full_view_free_entry(self) -> bool:
+        """Tap the fixed free-entry tile when the full-view H5 tree is absent."""
+        if not getattr(self, "_prefer_adb_home_tab", False):
+            return False
+        serial = getattr(self, "_device_serial", None)
+        if not serial:
+            return False
+        try:
+            adb = AdbController()
+            sizes = re.findall(r"(\d+)x(\d+)", adb.run("-s", serial, "shell", "wm", "size", timeout=10))
+            if not sizes:
+                return False
+            width, height = map(int, sizes[-1])
+            adb.run("-s", serial, "shell", "input", "tap", str(round(width * .79)), str(round(height * .32)), timeout=10)
+            self.log('已通过 ADB 点击全景视图中的“营销助手(免签入)”，等待输入页')
+            time.sleep(1)
+            return True
+        except (AdbError, OSError):
+            return False
+
     def _tap_home_marketing_flow(self) -> None:
         self.log('正在进入“智慧营销”')
-        self._dismiss_network_popup()
-        if not self._adb_tap_target(resource_id="com.sh.cm.grid4a:id/menu_nav_item_2"):
-            raise NavigationError("未找到底部智慧营销页签，请将手机停留在应用首页")
+        if not self._tap_main_marketing_tab():
+            self._dismiss_network_popup()
+            if not self._adb_tap_target(resource_id="com.sh.cm.grid4a:id/menu_nav_item_2"):
+                raise NavigationError("未找到底部智慧营销页签，请将手机停留在应用首页")
         root = self._wait_ui(lambda r: self._has_label(r, self._text("home_marker")) or
                             self._has_label(r, "暂无数据"), timeout=15)
-        if root is None or self._has_label(root, "暂无数据"):
+        if root is None:
+            if self._tap_full_view_free_entry():
+                return
+            self._tap_common_free_entry()
+            return
+        if self._has_label(root, "暂无数据"):
             self._tap_common_free_entry()
             return
         if not self._adb_tap_target(text=self._text("home_marker"), resource_id="com.sh.cm.grid4a:id/home_business_tab_tv"):
@@ -694,13 +761,12 @@ class MarketingAutomation:
         if root is None or self._has_label(root, "暂无数据"):
             self._tap_common_free_entry()
             return
-        if not self._adb_tap_target(text=self._text("marketing_entry")):
+        if not self._adb_tap_target(text=self._text("marketing_entry")) and not self._tap_full_view_free_entry():
             raise NavigationError("未找到“营销助手(免签入)”入口")
         self.log('已点击“营销助手(免签入)”，正在验证输入页')
 
     def _ensure_entry(self) -> None:
         self._switch_native()
-        self._dismiss_network_popup()
         self._back_to_entry_surface()
         self._tap_home_marketing_flow()
         self._wait_phone_input(timeout=30)
