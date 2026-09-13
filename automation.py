@@ -105,6 +105,19 @@ class MarketingAutomation:
             ))
         except (AdbError, OSError):
             return False
+
+    def _reset_uiautomator_state(self, serial: str) -> None:
+        """Clear a stale UiAutomator2 instrumentation before reconnecting."""
+        adb = AdbController()
+        for package in ("io.appium.uiautomator2.server", "io.appium.uiautomator2.server.test"):
+            try:
+                adb.run("-s", serial, "shell", "am", "force-stop", package, timeout=10)
+            except (AdbError, OSError):
+                pass
+        try:
+            adb.run("-s", serial, "forward", "--remove", "tcp:8200", timeout=10)
+        except (AdbError, OSError):
+            pass
         self.on_detail_progress = None
 
     def connect(self) -> None:
@@ -172,7 +185,18 @@ class MarketingAutomation:
         # report a failure and stop instead of appearing frozen.
         client_config = ClientConfig(remote_server_addr=appium_url, timeout=30,
                                      init_args_for_pool_manager={"init_args_for_pool_manager": {"retries": 0}})
-        self.driver = webdriver.Remote(appium_url, options=options, client_config=client_config)
+        try:
+            self.driver = webdriver.Remote(appium_url, options=options, client_config=client_config)
+        except Exception as exc:
+            error_text = str(exc).lower()
+            retry_markers = ("could not proxy command", "socket hang up", "disconnect() while connecting",
+                             "instrumentation process", "timeout")
+            if not serial or not any(marker in error_text for marker in retry_markers):
+                raise
+            self.log("UiAutomator2 服务启动时序异常，正在清理残留服务并重试一次…")
+            self._reset_uiautomator_state(serial)
+            time.sleep(3)
+            self.driver = webdriver.Remote(appium_url, options=options, client_config=client_config)
         self.driver.update_settings({"waitForIdleTimeout": 0, "waitForSelectorTimeout": 0})
         self.driver.implicitly_wait(0)
         self.driver.command_executor._client_config.timeout = 20
@@ -907,12 +931,13 @@ class MarketingAutomation:
                 if any(marker in error_text.lower() for marker in ("session lost", "invalid session", "no such session")):
                     raise
                 # Honor/MagicOS can briefly stall the UiAutomator2 proxy while
-                # the app's H5 home page is loading.  A failed page_source
-                # must not prevent the real ADB tap from reaching the phone;
-                # use a bounded ADB hierarchy dump as a recovery path.  Once
-                # navigation settles, subsequent snapshots return to Appium.
-                getattr(self, "log", lambda _: None)(f"Appium 页面读取超时，改用 ADB 读取当前控件：{error_text.split('Stacktrace:')[0]}")
-                return self._adb_ui_root_from_adb()
+                # the app's H5 home page is loading.  Do not start a second
+                # accessibility client with `uiautomator dump`: on this ROM
+                # that command competes with UiAutomator2 and leaves the
+                # instrumentation permanently hung.  Let the caller retry or
+                # recreate the session instead.
+                getattr(self, "log", lambda _: None)(f"Appium 页面读取失败，将由上层重试：{error_text.split('Stacktrace:')[0]}")
+                raise
         return self._adb_ui_root_from_adb()
 
     def _adb_ui_root_from_adb(self):
