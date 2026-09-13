@@ -1,0 +1,4 @@
+PySide6>=6.7,<7
+Appium-Python-Client>=4.0,<5
+openpyxl>=3.1,<4
+Pillow>=10,<12

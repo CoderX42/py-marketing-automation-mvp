@@ -1,0 +1,28 @@
+{
+  "app_package": "com.sh.cm.grid4a",
+  "check_login_state": false,
+  "app_activity": "com.sh.cm.grid4a.SplashActivity",
+  "appium_url": "http://127.0.0.1:4723/wd/hub",
+  "selectors": {
+    "home_marker": "个人业务",
+    "smart_marketing_tab": "智慧营销",
+    "full_view_marker": "全景视图",
+    "login_marker": "立即登录",
+    "marketing_entry": "营销助手(免签入)",
+    "network_error": "当前网络不可用",
+    "phone_input_hint": "手机号码",
+    "jump_button": "跳转",
+    "confirm_button": "确定",
+    "detail_marker": "营销详情"
+  },
+  "timing": {
+    "between_records_seconds": 10,
+    "random_jitter_seconds": 3,
+    "pause_every_records": 50,
+    "pause_minutes": 2,
+    "page_timeout_seconds": 30,
+    "detail_max_scrolls": 80,
+    "network_retries": 2,
+    "network_retry_seconds": 15
+  }
+}
